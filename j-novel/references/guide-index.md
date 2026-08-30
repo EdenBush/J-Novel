@@ -12,7 +12,7 @@
 |----------|------------|------------|
 | 采访任何一轮 | `guides/interview-engine.md` | `flows/phase1-interview.md` |
 | 采访收尾（生成标题） | `guides/title-guide.md` | — |
-| 规划章节结构 | `guides/plot-structures.md` | `guides/outline-template.md` |
+| 规划章节结构（超长篇 2000+ 章） | `guides/plot-structures.md` + **`guides/volume-arc-planning.md`**（卷/弧/市场验证/锁死留白） | `guides/outline-template.md` |
 | 写人物档案 | `guides/character-template.md` | `guides/character-building.md` |
 | 写故事圣经 | `guides/bible-template.md` | — |
 | **创建/更新创作台账** | `guides/creation-ledger.md` | — |
