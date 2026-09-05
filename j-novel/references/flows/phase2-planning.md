@@ -10,11 +10,11 @@
 [ ] 2. 【必须】故事圣经（读 guides/bible-template.md）
 [ ] 3. 【必须】人物档案 00-人物档案.md（读 guides/character-template.md + character-building.md）
 [ ] 4. 【必须】大纲 01-大纲.md（读 guides/outline-template.md + plot-structures.md + **volume-arc-planning.md（超长篇）**，每章字段完整）
-[ ] 5. 【必须】写作计划 02-写作计划.json（含 writingMode/writingTempo）
+[ ] 5. 【必须】写作计划 02-写作计划.json（含 writingMode/writingTempo/costMode/contentMode）
 [ ] 6. 【必须】状态台账 03-状态台账.md（人物/伏笔/时间线，**全部带三态标记**）
 [ ] 6.5【必须】创作台账 05-创作台账.md（读 guides/creation-ledger.md，五字段）
 [ ] 7. 【必须】第一批细纲（第 1-5 章，读 guides/hook-techniques.md 定招式）
-[ ] 8. 【必须】展示规划摘要 + 作者确认（写作模式 + 写作节奏）——**规划摘要必须带「我的保留意见」**
+[ ] 8. 【必须】展示规划摘要 + 作者确认（写作模式 + 写作节奏 + 费用模式 + 内容模式）——**规划摘要必须带「我的保留意见」**
 [ ] 9. 【必须】锚点章定调（精写第 1 章 → 作者确认文风 → 抽取锚点示例）
 → 清单全勾 + 作者确认 = 本阶段完成，进入 Phase 3
 ```
@@ -72,6 +72,8 @@
   "status": "planning",
   "writingMode": "[serial|subagent-parallel|agent-teams]",
   "writingTempo": "[marathon|chapter-by-chapter]",
+  "costMode": "[standard|low]",
+  "contentMode": "[normal|nsfw]",
   "chapters": [
     {
       "chapterNumber": 1,
@@ -91,6 +93,8 @@
 - `qualityLevel`：`anchor` 品质锚点章（开篇/高潮/转折等关键章节，精写）或 `advance` 普通推进章（批量生产）——由你根据大纲判断每章的重要性标记
 - `writingMode`：写作模式（步骤 7 由用户选择后填入）
 - `writingTempo`：写作节奏（步骤 7 由用户选择后填入）：`marathon` 疯狂创作（一口气写完，默认）/ `chapter-by-chapter` 逐章确认
+- `costMode`：费用模式（步骤 7 由用户选择后填入）：`standard` 全量质检（默认）/ `low` 低费用（见 `guides/low-cost-mode.md`）
+- `contentMode`：内容模式（步骤 7 由用户选择后填入）：`normal`（默认）/ `nsfw` 露骨内容（见 `guides/nsfw-mode.md`）
 
 ## 步骤 5.5：生成状态台账
 
@@ -343,8 +347,24 @@ Options:
 - 逐章确认（每章写完等你点头再写下一章，质量可控但需要你全程在场）
 ```
 
+**决策三：费用模式 + 内容模式**（两个正交开关，可组合）
+
+```
+Question: 选择费用模式
+Options:
+- 标准模式（全量质检：子技能+脚本+自评+评分，质量最高，token 消耗大；推荐锚点章）
+- 低费用模式（只跑 3 个脚本 + 一张速查卡，token 约省 2/3，质量略降；适合批量推进章）
+```
+
+```
+Question: 选择内容模式
+Options:
+- 常规模式（正常内容）
+- NSFW 模式（注入破甲层，露骨内容不 fade-to-black；写肉戏/成人向时选）
+```
+
 用户选择后：
-- 将 `writingMode` 和 `writingTempo` 写入 `02-写作计划.json`
+- 将 `writingMode`、`writingTempo`、`costMode`、`contentMode` 写入 `02-写作计划.json`
 - 更新 `status` 为 `"in_progress"`
 - 细纲确认（第一批）→ 进入 **Phase 3**：疯狂创作
 

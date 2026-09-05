@@ -90,6 +90,8 @@ WEAK = {
 }
 
 PRON = set('我你他她它')
+# 支持中英标准引号 与 日式括号「」『』（日式恐怖/轻小说风格常用，计数时须同等对待）
+QUOTE_CHARS = set('"“”「」『』')
 SENT_SPLIT = re.compile(r'[。！？…]+["”』」）]*')
 BODY_WORDS = ['手指', '掌心', '指节', '肩膀', '后颈', '膝盖', '脚踝', '喉咙', '舌尖',
               '牙齿', '胃', '太阳穴', '后背', '肋骨', '手腕', '锁骨', '眼皮', '鼻腔',
@@ -172,12 +174,14 @@ def analyze(text: str) -> dict:
         return None
     k = n / 1000.0
 
+    # 句子切分：按句末标点 + 紧跟的右引号切分。右引号（"”』」））紧跟句号是
+    # 句子结尾的一部分，切掉后下一句的句首才是真正的左引号，句首引号才测得准。
     sentences = [s for s in SENT_SPLIT.split(flat) if len(s) >= 2]
     slens = [len(s) for s in sentences]
     heads = [s[0] for s in sentences if s]
 
     pron_head = sum(1 for h in heads if h in PRON) / len(heads) * 100
-    quote_head = sum(1 for h in heads if h in '“"') / len(heads) * 100
+    quote_head = sum(1 for h in heads if h in '“"「『') / len(heads) * 100
     sent_mean = statistics.mean(slens)
     sent_cv = statistics.stdev(slens) / sent_mean if len(slens) > 3 and sent_mean else 0
 
@@ -185,7 +189,7 @@ def analyze(text: str) -> dict:
     para_cv = statistics.stdev(plen) / statistics.mean(plen) if len(plen) > 3 else 0
     tiny_para = sum(1 for x in plen if x <= 20) / len(plen) * 100
 
-    quotes = re.findall(r'[“"]([^”"]{2,})[”"]', flat)
+    quotes = re.findall(r'[“"「『]([^”"」』]{2,})[”"」』]', flat)
     dialog = sum(len(q) for q in quotes) / n * 100
 
     d = lambda ws: sum(flat.count(w) for w in ws) / k

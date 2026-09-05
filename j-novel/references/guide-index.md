@@ -32,6 +32,8 @@
 | **章节边界连续性（批次验收）** | `guides/continuity-check.md`（钩子桥接/场景重述红线） | 运行 `scripts/check_continuity.py`（退出码 1 = 有悬空钩子需复查） |
 | 规划/执行并发写作 | `guides/parallel-workflow.md` | `flows/phase3-writing.md` |
 | **派发子 Agent 前** | `guides/subagent-brief.md`（任务包标准模板：工具权限/绝对路径/必调子技能/排班/**三态台账条目**/诊断句） | `guides/parallel-workflow.md` |
+| **低费用模式（costMode: low）** | **`guides/low-cost-mode.md`** + `guides/quick-reference-card.md`（必读文件降为一页卡） | — |
+| **NSFW 模式（contentMode: nsfw）** | **`guides/nsfw-mode.md`** + 注入 `references/prompts/infinite-gen-3.md` | — |
 | 卷终维护圣经 | `guides/bible-template.md`（状态机） | `guides/creation-ledger.md`（台账对账） |
 
 ---
@@ -90,7 +92,7 @@ Reasonix 的四条铁律管"产物合不合格"，这四件套管"长跑中还�
 | **五 · 三态标记** | 标 `?` 的不得当既成事实写 | `03-状态台账.md` 的「落地」列 + 伏笔表 | 台账有条目没标状态位 |
 | **六 · seam 重读** | 每章边界重读创作台账五段 | `05-创作台账.md` | "最近重读章号"停在几章前 |
 | **七 · 置信度绑定** | 读到「晃」禁止原路重走 | `guides/confidence-binding.md` | 同一章原样重写第三遍 |
-| **八 · 注册分离** | 正文不得含细纲记号/质检字段/未展开缩写 | 每章步骤 6.5 注册审计 | 正文里出现【场景1】或评分 |
+| **八 · 注册分离** | 正文不得含细纲记号/质检字段/未展开缩写 | 每章步骤 6 注册审计 | 正文里出现【场景1】或评分 |
 
 **外加两把刀：**
 - **崩坏红线**（execution-contract 第六节）：连续 3 章同钩子 / 同段改 ≥3 次 / deai↔pad 交替 ≥2 轮 / 子代理无数字回报 → 五拍恢复
