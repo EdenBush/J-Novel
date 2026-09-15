@@ -28,9 +28,17 @@ import argparse
 import glob
 import io
 import json
+import os
 import re
 import sys
 from pathlib import Path
+
+# ── 共享实现（2026-09-14 重构）────────────────────────────────────
+# 旧实现的 read_text 用"中文占比最高"选编码：utf-16 能把任意偶数长度字节流
+# 解成中文乱码，在 ASCII 偏多的文件上会赢过 utf-8 → 角色名解成乱码 →
+# 边界检测**静默全部通过**。现统一走 _shared.read_text（BOM → 严格 utf-8 → 遗留编码）。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _shared import extract_body as _shared_extract_body, read_text as _shared_read_text  # noqa: E402
 
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -49,42 +57,46 @@ OPEN_LEN = 600     # 本章开头取多少字作"承接区"
 
 
 def read_text(path):
-    raw = Path(path).read_bytes()
-    best, br = None, -1.0
-    for e in _ENCODINGS:
-        try:
-            s = raw.decode(e)
-        except (UnicodeDecodeError, LookupError):
-            continue
-        r = len(_CJK.findall(s)) / max(1, len(s))
-        if r > br:
-            best, br = s, r
-    return best or ''
+    """读文件。**编码探测统一走 _shared.read_text**（2026-09-14 重构）。
+
+    旧实现的中文占比最高启发式会把 ASCII 偏多的 UTF-8 文件误判成 utf-16，
+    解出乱码 → 角色名匹配不上 → 边界检测**静默全部通过**（最危险的一种失败）。
+    """
+    return _shared_read_text(path)
 
 
 def extract_body(text):
-    out, skip = [], False
-    for raw in text.split('\n'):
-        line = raw.strip()
-        if line.startswith('【本章质检摘要】'):
-            skip = True
-            continue
-        if skip:
-            if line == '---':
-                skip = False
-            continue
-        if re.match(r'^(#|## |### )', line):
-            continue
-        if re.match(r'^第.{0,8}章', line):
-            continue
-        if line == '---' or re.match(r'^[=\-—_*·]{3,}$', line):
-            continue
-        if re.match(r'^[-*] \*\*', line):  # 概要/备注里的字段行
-            continue
-        if re.match(r'^(本章概要|核心事件|承接上章|开场类型|悬念钩子|章节备注|本章悬念|下章预告|伏笔标记|开场类型|正文)$', line):
-            continue
-        out.append(line)
-    return ''.join(out)
+    """取正文。**委托给 `_shared.extract_body`**（2026-09-14 二次修）。
+
+    ⚠️ 这里原本是一份**本地实现**，把上面 import 进来的 `_shared_extract_body`
+    整个覆盖掉了——于是 v4.6「三脚本统一 extract_body」的改动对本脚本**完全没生效**。
+
+    本地版少剥的东西（会让"钩子区/承接区"混进元数据）：
+      · `## 本章概要` / `## 章节备注` / `【本章质检摘要】` 的**整块散文内容**
+        （本地版只跳标记行和 `- **字段**` 行，块内其他文字照收）
+      · 面板行、纯符号行、章节号+标题行
+    后果：角色名可能来自"本章概要"而不是正文 → 边界判断错位。
+
+    现已纳入 `audit_release.py` 的 `_SHARED_FILES` 名单，并有"import 后被本地
+    def 覆盖"检测守着——写回去会直接 QA 失败。
+    """
+    return _shared_extract_body(text)
+
+
+def _warn_names_missing(why):
+    """角色名解析失败时必须**出声**——否则边界检测会静默全部通过。
+
+    2026-09-14 修：原实现在解析不出名字时返回空集，导致 in_hook 恒为空、
+    analyze_boundary 全部通过、退出码 0 —— 最危险的一种静默失败。
+    """
+    global _NAMES_WARNED
+    if not _NAMES_WARNED:
+        _NAMES_WARNED = True
+        print(f'[警告] 未能从 00-人物档案.md 解析出角色名（{why}）——'
+              f'边界检测将全部通过，等于没有检查。请确认档案用了 “### 名字” 或 “**名字（描述）**” 格式。')
+
+
+_NAMES_WARNED = False
 
 
 def load_names(char_file):
@@ -92,6 +104,7 @@ def load_names(char_file):
     只取"名"不取"姓"——'诺瓦·艾瑟兰' 只取 '诺瓦'，避免 '灰石/晨誓/暮影' 这类
     西式姓和地名/概念（灰石镇/晨誓骑士团）冲突造成误报。"""
     if not char_file or not Path(char_file).exists():
+        _warn_names_missing('人物档案文件不存在')
         return set()
     t = read_text(char_file)
     names = set()
@@ -114,6 +127,8 @@ def load_names(char_file):
         if not cand or block.search(cand) or len(cand) > 12:
             continue
         names.add(cand)
+    if not names:
+        _warn_names_missing('格式不匹配')
     return names
 
 
@@ -150,7 +165,7 @@ def main():
 
     print(f'# 章节边界连续性检测（角色名 {len(names)} 个：{"、".join(sorted(names)[:15])}{"…" if len(names) > 15 else ""}）\n')
 
-    report, hard_hits = [], 0
+    report, hard_hits, hit_pairs = [], 0, []
     for i in range(len(files) - 1):
         prev = extract_body(read_text(files[i]))
         cur = extract_body(read_text(files[i + 1]))
@@ -167,6 +182,7 @@ def main():
         print(f'   上章结尾钩子人物：{"、".join(r["hook_names"])}')
         if r['absent']:
             hard_hits += 1
+            hit_pairs.append((int(prev_name), int(cur_name)))
             print(f'   ⚠ 这些人物在本章开头 {OPEN_LEN} 字内未再出现：{"、".join(r["absent"])}')
             print(f'     → 上章结尾的钩子可能被晾了一章。人工复查：本章是否需要给 TA 一句交代？')
             if r['time_jump']:
@@ -177,12 +193,52 @@ def main():
             print(f'   （本章开头有跳变词：{"、".join(r["time_jump"])}，已接住钩子则无碍）')
         print()
 
-    print('=' * 60)
+    # ── 已放行的边界：读项目里的 05-创作台账.md 的 boundary-waived 记录 ──
+    # 2026-09-14 修①：此前只有 check_batch_gate 会读 waiver，Phase 4 直跑本脚本时
+    # 已放行的边界会被重新报一遍，编辑只好每次手工比对台账。放行是**业务规则**，
+    # 应该在检查工具本身生效，而不是在包装层生效。
+    #
+    # 2026-09-14 修②（**重要**）：此前是"一票全放行"——只要台账里有 ≥1 条
+    # boundary-waived，就 `raw_waived = hard_hits; hard_hits = 0` 把所有命中清零。
+    # 实测：3 章 2 处违规，只 waive 了「第1→2章」，脚本却报"**2 条**边界原本会被
+    # 报出…已跳过"，把没放行的「第2→3章」也静默吞掉，退出码 1→0。
+    # **它会撒谎**——这比不检查更危险。现改为**按「第N→M章」逐条匹配**。
+    waived_pairs, waived_note = set(), ''
     if hard_hits:
-        print(f'⚠ {hard_hits} 条边界存在"钩子人物在本章开头缺席"，需主编逐条复查：')
+        _ledger = None
+        for cand in (proj / '05-创作台账.md', proj.parent / '05-创作台账.md'):
+            if cand.exists():
+                _ledger = cand
+                break
+        if _ledger:
+            _lt = read_text(_ledger)
+            _ws = re.findall(
+                r'boundary-waived\s*[:：]\s*第\s*(\d+)\s*[→\->—]{1,2}\s*(\d+)\s*章', _lt)
+            waived_pairs = {(int(a), int(b)) for a, b in _ws}
+            if _ws:
+                waived_note = ' ｜ '.join(
+                    '第%s→%s章' % (a, b) for a, b in _ws[:4])
+
+    # 逐条扣除：只有**被显式写进台账的那一对章号**才算放行
+    unmatched = [p for p in hit_pairs if p not in waived_pairs]
+    truly_waived = len(hit_pairs) - len(unmatched)
+    hard_hits = len(unmatched)
+
+    print('=' * 60)
+    if truly_waived:
+        print(f'⚠ {truly_waived} 条边界已在 05-创作台账.md 显式放行，已跳过：{waived_note}')
+        print('   （放行是显式声明，不是默许——想撤销就在台账里删掉那一行。）')
+    if unmatched:
+        if truly_waived:
+            print(f'⚠ **但仍有 {len(unmatched)} 条未放行**，必须逐条处理：')
+        else:
+            print(f'⚠ {len(unmatched)} 条边界存在"钩子人物在本章开头缺席"，需主编逐条复查：')
+        for a, b in unmatched:
+            print(f'     · 第{a}→{b}章')
         print('  判断标准：这个钩子是"该接没接"（bug），还是"刻意留到后章"（正常）？')
-        print('  刻意留后章的，在大纲/细纲里标注"此钩子第X章回收"，否则下一批还会误报。')
-    else:
+        print('  **判定为正常的，在 05-创作台账.md 写一行放行记录**（不要绕过闸门）：')
+        print('     boundary-waived: 第N→N+1章，理由：该钩子第M章回收（理由 ≥8 字）')
+    elif not truly_waived:
         print('✓ 未发现明显的钩子悬空。')
     sys.exit(1 if hard_hits else 0)
 

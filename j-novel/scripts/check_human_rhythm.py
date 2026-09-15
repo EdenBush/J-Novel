@@ -38,11 +38,18 @@
 import argparse
 import io
 import json
+import os
 import re
 import statistics
 import sys
 from collections import Counter
 from pathlib import Path
+
+# ── 共享实现（2026-09-14 重构）────────────────────────────────────
+# read_text    ：编码探测（旧实现会把 ASCII 偏多的 UTF-8 误判成 utf-16 → 静默乱码）
+# extract_body ：正文提取（此前三个脚本各写一份，实测同一章分母差 12.6%）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _shared import extract_body as _shared_extract_body, read_text as _shared_read_text  # noqa: E402
 
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -56,15 +63,15 @@ if sys.platform == 'win32':
 #   齐佩甲《超神机械师》(系统流) / 三天两觉《惊悚乐园》(无限流吐槽) / 柳岸花又明《我真没想重生啊》(都市重生)
 # 三样本覆盖了"男频快节奏 / 吐槽话痨 / 都市生活"三种风格，避免被单一作者带偏。
 THRESHOLDS = {
-    'pron_head':    dict(kind='max',   hard=15.0,  soft=25.0,  humans='1.5–10.4', human=4.0,
+    'pron_head':    dict(kind='max',   hard=15.0,  soft=13.0,  humans='1.5–10.4', human=4.0,
                          desc='句首代词占比 %', why='人类几乎不用"我/他/她"开句（三作者 1.5–10.4%，AI 25.8–47.3%）'),
-    'quote_head':   dict(kind='min',   hard=15.0,  soft=12.0,  humans='18.4–30.6', human=18.4,
+    'quote_head':   dict(kind='min',   hard=15.0,  soft=18.0,  humans='18.4–30.6', human=18.4,
                          desc='句首引号占比 %', why='人类让对话先行（三作者 18.4–30.6%，AI 0–1.4%）'),
-    'sent_mean':    dict(kind='min',   hard=18.0,  soft=22.0,  humans='22.7–36.6', human=30.0,
-                         desc='平均句长(字)', why='弱判据：只拦最极端的碎句（惊悚乐园仅 22.7 字，AI-A 15 字）'),
-    'dash':         dict(kind='max',   hard=1.5,   soft=2.5,   humans='0.05–0.97', human=0.47,
+    'sent_mean':    dict(kind='min',   hard=18.0,  soft=23.0,  humans='22.7–36.6', human=30.0,
+                         desc='平均句长(字)', why='弱判据：hard=18 只拦最极端的碎句；**目标区间是 23–37（人类均值 30.8）**，soft=23 提示未进人类区间（惊悚乐园 24.4 亦达标）'),
+    'dash':         dict(kind='max',   hard=1.5,   soft=1.3,   humans='0.05–0.97', human=0.47,
                          desc='破折号/千字', why='破折号是"句子写完了再补一刀"的痕迹（人类 ≤0.97，AI 3.8–5.0）'),
-    'body':         dict(kind='max',   hard=1.0,   soft=1.6,   humans='0.31–0.55', human=0.32,
+    'body':         dict(kind='max',   hard=1.0,   soft=0.85,  humans='0.31–0.55', human=0.32,
                          desc='身体部位/千字', why='SKILL 教"情绪身体化"后被顶格执行到人类的 7 倍'),
     'emotion':      dict(kind='range', lo=0.25,    hi=0.50,    humans='0.32–0.35', human=0.33,
                          desc='情绪词/千字', why='最稳定锚点：三作者惊人一致 0.32–0.35，AI 被禁到 0.07–0.17'),
@@ -74,31 +81,77 @@ THRESHOLDS = {
                          desc='对话占比 %', why='弱判据：人类 20.4–33.5 与 AI 29.5–38.4 有重叠，只做防堆对话护栏'),
     'act_density':  dict(kind='max',   hard=0.40,  soft=0.30,  humans='0.106–0.247', human=0.114,
                          desc='动作短语密度/千字', why='按密度算（非绝对次数）：AI 是人类的 6–8 倍'),
+
+    # ---- 深度分布指标（第二轮诊断新增；基线 = 3 人类 + 4 AI 实测，均完全分离）----
+    # 为什么加这一层：均值已能达标（句长/情绪词/破折号），但读起来仍有 AI 味。
+    # 根因是"均值达标 ≠ 分布形状像人"。
+    'long_sent_pct': dict(kind='min',  hard=3.0,   soft=5.0,   humans='4.7–19.0', human=10.0,
+                         desc='超长句(≥60字)占比 %', why='**最强指标**：人类把多个信息单元打包进一个复合句（4.7–19.0%），AI 只会拆成一串短句（0.7–2.1%）——差 3–25 倍'),
+    'sent_p90':     dict(kind='min',   hard=42,    soft=50,    humans='48–74', human=60,
+                         desc='句长 p90(字)', why='长句能力的上沿：人类 48–74 字，AI 压在 31–41 —— 说明 AI 根本没能力写长'),
+    'rhythm_cv':    dict(kind='min',   hard=0.19,  soft=0.25,  humans='0.251–0.321', human=0.30,
+                         desc='节奏变异系数', why='500 字窗口句长均值的起伏：人类"该急则全短句、该缓则长句铺陈"（0.25–0.32），AI 全程一个节奏（0.17–0.26，与人类下沿有重叠，故取 0.19 只拦最极端）'),
+    'cn_measure':   dict(kind='max',   hard=10.5,  soft=9.5,   humans='7.04–8.76', human=7.4,
+                         desc='中文量词密度/千字', why='**反向指标**：AI 用"一+量词"做泛化指代（一身/一张/一群人）达 11.4–19.2，人类只有 7.04–8.76——人类用具体数字或专有名词'),
+    'long_dialog':  dict(kind='min',   hard=8.0,   soft=12.0,  humans='15.8–27.7', human=19.2,
+                         desc='长对话(≥30字)占比 %', why='人类对话里有"一段完整发言"（讲道理/诉苦/回忆/辩解），AI 全是短促的信息交换（4.1–14.6%）'),
+    'digit_density': dict(kind='min',  hard=0.8,   soft=1.2,   humans='1.16–3.15', human=2.5,
+                         desc='数字/千字（具体性）', why='人类用具体数字锚定世界（1.16–3.15），AI 几乎不用（0.05–0.83）——差 1.4–60 倍'),
+    'real_measure': dict(kind='min',   hard=0.05,  soft=0.12,  humans='0.07–0.72（现实题材）', human=0.30,
+                         desc='现实锚定计量/千字', why='**人类技法型指标（第 15 项，实测 19 倍、接近完全分离）**：人类用真实世界的数目锚定现实——"998 的套餐""9 月 1 号""602 宿舍""月薪六千"。'
+                              'AI 几乎只用面板数值（7／100、17 秒），从不锚定现实。'
+                              '⚠️ 两点注意：① **题材敏感**——架空/游戏世界豁免（人类《惊悚乐园》仅 0.07，因其世界观里没有钱），只在现实或半现实题材判；'
+                              '② **余量薄**（人类最低 0.07 vs 硬线 0.05）——当提示用，**不许为了过线硬塞数字**（那是 hack）。'),
+
+    # ---- 作者在场（第 16 项，2026-09-13 新增；A/B 盲测三位评委一致指出的头号缺口）----
+    'author_presence': dict(kind='range', lo=2.5, hi=12.0,
+                         humans='3.73–7.84', human=5.96,
+                         desc='作者在场指数（叙述部分）',
+                         why='**最强的人类/AI 判别器（实测约 2–10 倍分离）**：把引号里的对话剥掉，只统计**叙述部分**的叙述者人格痕迹——'
+                              '评价副词（其实/居然/简直/毕竟）×1 + 口语插话（说白了/反正/怎么说呢）×3 + 吐槽贬称（这货/欠揍/要命）×3 + 语气词×1，'
+                              '再加上**叙述句**里 ？和 ！的占比×0.5。'
+                              '人类 3.73（惊悚乐园）/ 6.25（重生啊）/ 7.84（超神机械师）；'
+                              'AI 全书 0.64 / 1.27 / 1.89；上轮 A/B 四篇 0.00 / 0.00 / 0.36 / 0.75。'
+                              '**根因：AI 的叙述是透明的——只报告事件，不表态。**'
+                              '⚠️ **上限 12 是防 hack**（把吐槽词塞满会变成另一种 AI 味）——它是**区间项**，不是"越高越好"。'),
 }
 # 弱证据：只提示，不计入退出码
 WEAK = {
     'sent_cv':      dict(human='0.76–0.84', soft=None, desc='句长变异系数',
                          note='已证伪：三作者 0.76–0.84 与 AI 0.71–0.83 重叠，不作为判据'),
-    'tiny_para':    dict(human='15.2–37.3', soft=40.0, desc='单句成段占比 %',
-                         note='弱证据：人类本身就有三成短段（惊悚乐园 71%、重生啊 37%），只在 >40% 时提示'),
+    'para_cv':      dict(human='0.63–1.12', soft=None, desc='段长变异系数',
+                         note='不判：段落层已有 single_para 作判据（人类 40.8–99.0%），'
+                              '段长 CV 与 single_para 高度相关，只作为观测值输出'),
+    'single_para':  dict(human='40.8–99.0', soft=40.0, dir='lt', desc='单句成段占比 %',
+                         note='**段落层的真判据**（2026-09-13 新增）：人类网文默认"一句一段"——惊悚乐园 40.8 / 超神机械师 83.4 / 重生啊 99.0，'
+                              'AI 三个样本只有 30.3–37.2。低于 40 提示（弱证据、不阻塞；惊悚乐园 40.8 正好压在下沿，短句风格豁免）'),
+    'sent_max':     dict(human='86–166（窗口 p10–p90）', soft=90.0, dir='lt', desc='最长句(字)',
+                         note='**长度上沿**（2026-09-13 新增）：取全章最长的一句，看 AI 有没有把一整个复杂处境塞进一句的能力。'
+                              '实测窗口级：人类中位 112（p10 86 / p90 166），非人类中位 79（p10 52 / p90 128）。'
+                              '**阈值 100 字时：人类章 72.6% 通过、非人类章只有 22.0%** —— 这是**概率信号，不是干净闸门**，'
+                              '所以只做非阻塞提示（低于 90 才提示）。写作目标：每章 1–2 句 ≥80 字，其中至少 1 句 ≥100 字。'),
+    'tiny_para':    dict(human='26.9–43.8', soft=None, desc='短段(≤20字)占比 %',
+                         note='⚠ 已证伪，不作为判据：原实现把它当"单句成段"用，但它算的是"段落 ≤20 中文字"。'
+                              '实测人类 26.9–43.8 vs AI 35.9–53.7 —— **完全重叠、无区分度**，且原基线 15.2–37.3 亦不准。此处仅保留观测'),
     'conc50':       dict(human='9.7–15.8', soft=None, desc='top50 2gram 覆盖率 %',
                          note='弱证据：受题材影响太大（惊悚乐园 15.8 因系统面板），不作为判据'),
-    'digit_density': dict(human='1.46–3.13', soft=0.50, dir='lt', desc='数字/千字',
-                         note='具体性弱信号：人类 1.46–3.13，AI 0.05–0.11。题材敏感（系统流天然多数字），低于 0.5 提示"太泛"，但不阻塞——别让 Agent 机械撒数字'),
     'dialog':       dict(human='20.4–33.5', soft=10.0, dir='lt', desc='对话占比过低 %',
                          note='弱证据：人类 20.4–33.5。reasonix 旧作《禁欲之锁》全书对话 0.0%（全是叙述+心理），《暗处的狩猎》仅 10.1%——"对话洁癖"的反面。低于 10% 提示，题材敏感不阻塞'),
 }
 
 PRON = set('我你他她它')
 # 支持中英标准引号 与 日式括号「」『』（日式恐怖/轻小说风格常用，计数时须同等对待）
-QUOTE_CHARS = set('"“”「」『』')
 SENT_SPLIT = re.compile(r'[。！？…]+["”』」）]*')
 BODY_WORDS = ['手指', '掌心', '指节', '肩膀', '后颈', '膝盖', '脚踝', '喉咙', '舌尖',
               '牙齿', '胃', '太阳穴', '后背', '肋骨', '手腕', '锁骨', '眼皮', '鼻腔',
               '耳膜', '额头', '眉心', '胸口', '手背', '脚背', '脖颈']
 EMOTION_WORDS = ['愤怒', '悲伤', '恐惧', '痛苦', '绝望', '激动', '委屈', '欣喜', '慌乱',
                  '愧疚', '心碎', '窒息', '崩溃', '震惊', '不安', '心动', '心疼', '难受']
-SIMILE_WORDS = ['像', '如同', '宛如', '犹如', '好似', '仿佛是']
+# ⚠️ 2026-09-14 收归共享：明喻词表与计数此前在 check_human_rhythm / check_aistyle
+#    各写一份，而且 aistyle 那份是**死代码**（定义了带负向断言的 count_similes，
+#    实际算密度却用裸 str.count）→「像」仍误匹配 图像/偶像/雕像。
+#    现在只有 _shared 一份，本文件直接 import（见 _shared.py 同名注释）。
+from _shared import SIMILE_WORDS, count_similes  # noqa: E402  （模块级导入见文件顶部约定）
 ACTION_PATTERNS = ['皱起眉头', '握紧拳头', '深吸一口气', '低下头', '抬起头', '别过脸',
                    '转过身', '张了张嘴', '抿了抿嘴', '叹了口气', '眨了眨眼', '攥紧',
                    '垂下眼', '攥了攥', '心头一颤', '瞳孔一缩', '嘴角勾起', '喉结动了动']
@@ -114,54 +167,23 @@ _MIN_CJK_RATIO = 0.30      # 中文字符占比低于此值 → 判定为解码�
 
 
 def read_text(path) -> str:
-    """按 utf-8 → gb18030 → gbk → utf-16 → big5 顺序探测，取中文占比最高的成功解码。"""
-    raw = Path(path).read_bytes()
-    best, best_ratio = None, -1.0
-    for enc in _ENCODINGS:
-        try:
-            s = raw.decode(enc)
-        except (UnicodeDecodeError, LookupError):
-            continue
-        ratio = len(_CJK.findall(s)) / max(1, len(s))
-        if ratio > best_ratio:
-            best, best_ratio = s, ratio
-    if best is None or best_ratio < _MIN_CJK_RATIO:
+    """读文件。**编码探测统一走 _shared.read_text**（2026-09-14 重构）。
+
+    旧实现按各编码解出来的中文占比最高选编码 —— utf-16 能把任意偶数长度字节流
+    解成中文乱码，在 ASCII 偏多的文件上会赢过 utf-8，导致**静默读成乱码**。
+    实测 400 个真实 UTF-8 文件里 16 个（4%）会被选错。新实现：BOM → 严格 utf-8 → 遗留编码。
+    """
+    s = _shared_read_text(path)
+    if len(_CJK.findall(s)) / max(1, len(s)) < _MIN_CJK_RATIO:
         raise SystemExit(
-            f'[错误] 无法解码或中文占比过低（{best_ratio:.1%}）：{path}\n'
-            f'       已尝试 {"、".join(_ENCODINGS)}。请确认文件编码后转成 UTF-8 再跑。\n'
-            f'       ⚠ 绝不要忽略这个错误继续执行——乱码会让所有指标显示为 0，看起来像"全部达标"。'
-        )
-    return best
-# 需要剥离的非正文行（统计时也不能算进去）
-# 不剔掉这些，章节标题/系统面板/作者打赏语会把句长分布拉歪——
-# 人类样本里这类行很多，不处理会让"人类自己都过不了人类基线"
-META_LINE = re.compile(r'^(#{1,6}\s|【本章质检摘要】|【本章概要】|---+$|={3,}|^\s*$)')
-NON_PROSE = [
-    re.compile(r'^\s*\d{2,4}\s+\S.{0,24}$'),      # 章节号 + 标题（"094 求援"）
-    re.compile(r'^\s*p[sS]?[:：]'),                # 作者单章求票/感谢语
-    re.compile(r'^\s*[\[【].{0,80}[\]】]\s*$'),    # 系统面板整行（"[你已杀死…]"）
-    re.compile(r'^\s*[\d\W_]{1,10}$'),             # 纯数字/符号行
-    re.compile(r'^\s*(作品相关|内容简介|后记|番外)\s*$'),
-]
+            f'[错误] 读不出中文内容（{path}）——可能是非文本文件或未知编码。\n'
+            f'        注意：退出码 1 与检测不合格不可区分，请先确认文件本身可读。')
+    return s
 
 
-def extract_body(text: str) -> str:
-    out, skip = [], False
-    for raw in text.split('\n'):
-        line = raw.strip()
-        if line.startswith('【本章质检摘要】'):
-            skip = True
-            continue
-        if skip:
-            if line == '---':
-                skip = False
-            continue
-        if META_LINE.match(line):
-            continue
-        if any(p.match(line) for p in NON_PROSE):
-            continue
-        out.append(line)
-    return '\n'.join(out)
+def extract_body(text):
+    """委托给共享实现（保号，供本脚本内部调用）。"""
+    return _shared_extract_body(text)
 
 
 def analyze(text: str) -> dict:
@@ -185,9 +207,15 @@ def analyze(text: str) -> dict:
     sent_mean = statistics.mean(slens)
     sent_cv = statistics.stdev(slens) / sent_mean if len(slens) > 3 and sent_mean else 0
 
+    sent_max = max(slens) if slens else 0
     plen = [len(p) for p in paras]
     para_cv = statistics.stdev(plen) / statistics.mean(plen) if len(plen) > 3 else 0
+    # 段落层两个量（2026-09-13 修正：原实现只算 tiny_para 却叫它"单句成段"）
+    #   tiny_para   = 短段（≤20 中文字）—— 人类 26.9–43.8 vs AI 35.9–53.7，完全重叠，已证伪
+    #   single_para = 单句成段（段内只有 1 句）—— 人类 40.8–99.0 vs AI 30.3–37.2，接近完全分离
     tiny_para = sum(1 for x in plen if x <= 20) / len(plen) * 100
+    para_sentn = [max(1, len([s for s in SENT_SPLIT.split(p) if len(s) >= 2])) for p in paras]
+    single_para = sum(1 for x in para_sentn if x <= 1) / len(para_sentn) * 100
 
     quotes = re.findall(r'[“"「『]([^”"」』]{2,})[”"」』]', flat)
     dialog = sum(len(q) for q in quotes) / n * 100
@@ -198,6 +226,37 @@ def analyze(text: str) -> dict:
     act_density = round(sum(acts.values()) / k, 3)
     # 数字密度（具体性信号）：人类用具体数字锚定世界（1.46–3.13/千字），AI 几乎不用（0.05–0.11）
     digit_density = round(len(re.findall(r'[0-9]+', flat)) / k, 2)
+    # 现实锚定计量（第 15 项，人类技法型）：真实世界的数目——"998 的套餐""9 月 1 号""602 宿舍"
+    # 与 digit_density 的区别：digit_density 只数阿拉伯数字；这一项要求数字**绑定现实单位/物件**。
+    # 实测人类 0.08–0.72 / AI 0.00–0.07（19 倍，接近完全分离）。仅现实题材判，架空题材豁免。
+    real_measure = round(len(re.findall(r'[0-9]{2,4}\s*(?:元|块|万|年|版|号|套餐|级|岁)', flat)) / k, 2)
+
+    # ---- 作者在场（第 16 项，2026-09-13 新增）----
+    # 方法：把「对话部分」（引号内）剥掉，只在**叙述部分**统计叙述者的人格痕迹。
+    # 依据：A/B 盲测三位评委一致指出 AI 稿"缺少作者在场的感觉"——问题不在对话，在叙述者。
+    # 实测 6 部全书 + 4 篇 A/B：人类 3.73–7.84 vs AI 0.64–1.89 vs A/B 0.00–0.75（约 2–10 倍分离）。
+    # 人类叙述者会：评价（其实/居然/简直）、口语插话（毕竟/反正/怎么说呢）、吐槽（这货/欠揍）、
+    #               以及在**叙述句**里用 ？和 ！（AI 把 ?/! 全放进引号里，叙述部分几乎为 0）
+    # 上限从 400 放宽到 2000：一段「完整发言」可能远超 400 字，剥不掉会被算成叙述
+    # （仍不设无限量词——无界 +? 在无配对引号的文本上会退化成 O(n²)）
+    narr = re.sub(r'[“"「『][^”"」』]{0,2000}?[”"」』]', '　', flat)
+    narr = re.sub(r'[^\u4e00-\u9fff。！？…，、；：]', '', narr)
+    nn = len(narr)
+    if nn >= 800:
+        nk = nn / 1000.0
+        nsents = [s for s in re.findall(r'[^。！？…]*[。！？…]', narr) if len(s) >= 3]
+        _eval = len(re.findall(r'其实|才是|根本|简直|偏偏|倒是|分明|居然|竟然|果然|说到底|无非|实在是|算不上|充其量', narr))
+        _informal = len(re.findall(r'说白了|说实话|老实说|反正|毕竟|好歹|怎么说呢|这么说吧|别的不说|换句话说', narr))
+        _mock = len(re.findall(r'这货|这家伙|这小子|这厮|这孙子|蠢|离谱|要命|见鬼|鬼才|有病|缺德|不要脸|作死|欠揍|活该|真香|牛逼|丢人', narr))
+        _interj = len(re.findall(r'[嘿哈哎唉啧喔诶哟喂嘶]', narr))
+        narr_q = round(sum(1 for s in nsents if s.endswith('？')) / len(nsents) * 100, 1) if nsents else 0.0
+        narr_ex = round(sum(1 for s in nsents if s.endswith('！')) / len(nsents) * 100, 1) if nsents else 0.0
+        author_presence = round((_eval + _informal * 3 + _mock * 3 + _interj) / nk + (narr_q + narr_ex) * 0.5, 2)
+    else:
+        # 叙述部分不足 800 字（对话极密集的短章）：样本太小，判不出来。
+        # 原本返回 0.0 → 会撞上 lo=2.5 误判 FAIL。改为标记为"跳过"。
+        narr_q = narr_ex = 0.0
+        author_presence = None
 
     f2 = re.sub(r'[^\u4e00-\u9fff]', '', flat)
     grams = Counter()
@@ -209,20 +268,54 @@ def analyze(text: str) -> dict:
     tot = sum(grams.values())
     conc50 = sum(c for _, c in grams.most_common(50)) / tot * 100 if tot else 0
 
+    # ---- 深度分布指标（第二轮诊断新增）----
+    # 动机：均值已能达标（句长/情绪词/破折号），但读起来仍有 AI 味。
+    #      实测发现——"均值达标 ≠ 分布形状像人"。以下 5 项是分布层的强区分指标。
+    #
+    # 1. 超长句占比（≥60 字）：人类 4.7–19.0%，AI 0.7–2.1% —— 最强指标（差 2–25 倍）
+    #    本质：人类把多个信息单元"打包"进一个复合句，AI 倾向拆成多个短句。
+    long_sent_pct = sum(1 for x in slens if x >= 60) / len(slens) * 100 if slens else 0
+    # 2. 句长 p90：人类 48–74 字，AI 31–41 字
+    slens_sorted = sorted(slens)
+    sent_p90 = slens_sorted[min(len(slens_sorted) - 1, int(len(slens_sorted) * 0.9))] if slens_sorted else 0
+    # 3. 节奏 CV（500 字窗口内句长均值的变异系数）：人类 0.251–0.321，AI 0.165–0.258
+    #    本质：人类"该急的地方全是短句、该缓的地方用长句铺陈"，AI 全程保持同一节奏。
+    win, win_means = 500, []
+    for i in range(0, max(1, n - win), win):
+        ss = [len(x) for x in SENT_SPLIT.split(flat[i:i + win]) if len(x) >= 2]
+        if len(ss) >= 3:
+            win_means.append(statistics.mean(ss))
+    rhythm_cv = statistics.stdev(win_means) / statistics.mean(win_means) if len(win_means) > 3 else 0
+    # 4. 中文「数字+量词」密度：人类 7.04–8.76，AI 11.4–19.0（**AI 反而是人类的 2–3 倍**）
+    #    本质：AI 大量用"一+量词"做泛化指代（一身大红/一张脸/一群人），
+    #          人类用"具体数字+量词"或专有名词（三根烟/五分钟/那件洗得发白的褂子）。
+    cn_measure = len(re.findall(r'[0-9一二三四五六七八九十百千两]\s*[个只条把张杯辆本支颗根块件次年岁天月分钟秒点级层步句笔名页章套枚台架艘座间]', flat)) / k
+    # 5. 长对话占比（≥30 字的引号内容）：人类 15.8–27.7%，AI 4.1–14.6%
+    #    本质：AI 对话全是"短促的信息交换"，缺少"一段完整发言"（讲道理/诉苦/回忆/辩解）。
+    long_dialog = sum(1 for q in quotes if len(q) >= 30) / len(quotes) * 100 if quotes else 0
+
     return dict(
         chars=n, sent_n=len(sentences), para_n=len(paras),
         pron_head=round(pron_head, 1), quote_head=round(quote_head, 1),
         sent_mean=round(sent_mean, 1), sent_cv=round(sent_cv, 2),
         para_cv=round(para_cv, 2), tiny_para=round(tiny_para, 1),
+        single_para=round(single_para, 1),
         dialog=round(dialog, 1), dash=round(flat.count('——') / k, 2),
         body=round(d(BODY_WORDS), 2), emotion=round(d(EMOTION_WORDS), 2),
-        simile=round(d(SIMILE_WORDS), 2), conc50=round(conc50, 1),
+        simile=round(count_similes(flat) / k, 2), conc50=round(conc50, 1),
         act_density=act_density, acts=acts, digit_density=digit_density,
+        real_measure=real_measure,
+        long_sent_pct=round(long_sent_pct, 2), sent_p90=sent_p90, sent_max=sent_max,
+        rhythm_cv=round(rhythm_cv, 3), cn_measure=round(cn_measure, 2),
+        long_dialog=round(long_dialog, 1),
+        author_presence=author_presence, narr_q=narr_q, narr_ex=narr_ex,
     )
 
 
 def grade(key, val):
     t = THRESHOLDS[key]
+    if val is None:
+        return 'SKIP', '样本不足（叙述部分 <800 字），本项跳过'
     if t['kind'] == 'max':
         if val > t['hard']:
             return 'FAIL', f"超硬阈值 {t['hard']}"
@@ -264,8 +357,9 @@ def report(name, r, as_json=False):
             goal = f"≥{t['hard']}"
         else:
             goal = f"{t['lo']}–{t['hi']}"
-        mark = {'PASS': '✓', 'WARN': '△', 'FAIL': '✗'}[st]
-        print(f"{t['desc']:<20}{val:>9}{t['humans']:>14}{goal:>12}   {mark} {note}")
+        mark = {'PASS': '✓', 'WARN': '△', 'FAIL': '✗', 'SKIP': '–'}[st]
+        shown = "—" if val is None else val
+        print(f"{t['desc']:<20}{shown:>9}{t['humans']:>14}{goal:>12}   {mark} {note}")
     print('-' * 66)
     for key, t in WEAK.items():
         if t.get('soft') is None:
@@ -277,7 +371,6 @@ def report(name, r, as_json=False):
                 print(f"  [弱证据] {t['desc']} = {r[key]}（人类 {t['human']}，{op}{t['soft']} 才提示）—— {t['note']}")
     if r['acts']:
         print(f"  动作短语：{'  '.join(f'{k}×{v}' for k, v in sorted(r['acts'].items(), key=lambda x: -x[1])[:6])}")
-    total = fails * 0 + warns
     if fails:
         print(f"  ✗ {fails} 项未达标（硬）—— 本章不合格，按置信度绑定读到「晃」处理")
     elif warns:

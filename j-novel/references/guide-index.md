@@ -4,6 +4,8 @@
 
 本 SKILL 的所有引用路径相对**本 SKILL 目录**（安装后通常在 `~/.workbuddy/skills/j-novel/`）。找不到文件时，先定位 SKILL 目录再读，**不要因为找不到就跳过**。
 
+> **改 SKILL 本身、或排查"规则写了却没生效"时** → 先读 `references/skill-mechanics.md`（三层加载模型：SKILL.md 全量注入 / flows 按阶段读 / guides 按动作读；子代理隔离性；常见反模式）。**放错层级 = 规则不存在。**
+
 ---
 
 ## 动作 → 必读指南
@@ -18,22 +20,34 @@
 | **创建/更新创作台账** | `guides/creation-ledger.md` | — |
 | **每章动笔前（seam 重读）** | `05-创作台账.md`（五段全文） | `guides/creation-ledger.md` |
 | **动笔写任何一章前** | `guides/writing-mindset.md` + **`guides/concrete-voice.md`** | `guides/chapter-template.md` |
-| 规划/写作章首引子（仅新起型）与章尾钩子、判定开场类型 | `guides/hook-techniques.md` + `guides/chapter-craft.md`（「续接优先」） | — |
-| 写对话 | `guides/dialogue-writing.md` | — |
+| **定章末型 / 定开场方式 / 定情绪载体（写细纲时就要做）** | **`guides/narrative-craft.md`**（人类作者的**决策逻辑**：章末四型+实测配比／日常进入型开场／结构级废笔／称呼即关系刻度／异质材料插入／情绪的外部介质／排版即节奏，**每项附真实人类原文**） | `guides/hook-techniques.md`（四型怎么落笔）· `guides/chapter-craft.md`（开场类型判定） |
+| 规划/写作章首引子（仅新起型）与章尾落点、判定开场类型 | `guides/hook-techniques.md`（**章尾四型**：信息结算 30% / 关系余韵 27% / 喜剧反转 23% / 悬念 13%）+ `guides/chapter-craft.md`（「续接优先」+ 日常进入型） | — |
+| 写对话 | `guides/dialogue-writing.md`（含**三之二·称呼即关系刻度**） | — |
+| **从零开始完整流程**（七轮采访 + 圣经 + 正文） | **`reasonix-novel-weaver`** | — |
+| **高效出稿**（质量可接受、追求速度） | **`reasonix-novel-weaver-lite`** | — |
+| **章节质检后（脚本已全绿）** | **`guides/review-agent.md`**（独立质检子代理：同构／删除／作者在场／用力过猛 四项测试） | — |
 | **每章质检** | `guides/ai-taste-selfcheck.md` + `guides/hard-style-check.md` + `guides/continuity-check.md` + `guides/human-quota.md` + **`guides/human-rhythm.md`** | 运行 `scripts/check_repetition.py`（重复）+ `scripts/check_aistyle.py`（词汇层指纹）+ **`scripts/check_human_rhythm.py`（句法层节律，退出码 1 = 不合格）** |
 | **质检后给读数定档** | `guides/confidence-binding.md` | — |
 | **读数「晃」/ 重试换路** | `guides/confidence-binding.md` | — |
 | **节律/词汇检测超标后修改** | **`guides/rewrite-playbook.md`**（脚本报哪项超就翻哪节，按招改） | `guides/human-rhythm.md`（规则原理解释） |
+| **"读着还是 AI 味"（表层指标已达标）** | **`guides/post-polish.md`**（后精修 4 工序：长句缝合/定指替换/长对话补足/节奏起伏）——治**深度分布指标**（超长句占比/p90/节奏CV/中文量词/长对话/数字） | `guides/concrete-voice.md`（具体性原理） |
 | AI 味重需清洗 / 修改前的指令措辞 | `guides/deai-workflow.md` + **`guides/occupancy-rewrite.md`** | — |
 | **生成细纲 / 章节任务卡 / 派发子代理任务包**（这些本质都是"对 LLM 的写作指令"） | **`guides/prompt-engineering.md`**（5 原则，防止指令本身诱导 AI 味——你写"补充细节"它就用破折号补刀，你写"写具体"它就写"一个人"） | — |
 | **改 SKILL 规则 / 写任何新的写作指令前** | **`guides/prompt-engineering.md`** | — |
 | 字数不足需扩充 | `guides/chapter-craft.md`（扩充技巧） | — |
 | 故事平淡需爽点 | `guides/thrill-panel.md` | — |
 | **章节边界连续性（批次验收）** | `guides/continuity-check.md`（钩子桥接/场景重述红线） | 运行 `scripts/check_continuity.py`（退出码 1 = 有悬空钩子需复查） |
-| 规划/执行并发写作 | `guides/parallel-workflow.md` | `flows/phase3-writing.md` |
-| **派发子 Agent 前** | `guides/subagent-brief.md`（任务包标准模板：工具权限/绝对路径/必调子技能/排班/**三态台账条目**/诊断句） | `guides/parallel-workflow.md` |
+| **并发写作（默认走链式流水线）** | **`guides/chained-pipeline.md`**（并行单位 = **工序**非章节；接口契约冻结；笔手/磨手/主编三角色） | `guides/parallel-workflow.md`（批次闸门/台账/锚点滚动/交叉互检） |
+| **批次放行前（硬性）** | 跑 `scripts/check_batch_gate.py <项目目录>`（**退出码 0 才许继续**；查乱序完成/字数/质检痕迹/台账推进/章节边界） | — |
+| **派发子 Agent 前** | `guides/subagent-brief.md`（任务包标准模板：工具权限/绝对路径/必调子技能/排班/**三态台账条目**/**接口契约**/诊断句） | `guides/chained-pipeline.md` |
 | **低费用模式（costMode: low）** | **`guides/low-cost-mode.md`** + `guides/quick-reference-card.md`（必读文件降为一页卡） | — |
+| **派发子代理 / 子代理写作前** | **`guides/quick-reference-card.md`**（**子代理默认只读这一页**，不读全套 guide——含成本配额卡/硬指标九项+深度七项+硬性句式/情绪配比/人味配额/改写顺序/成本纪律） | `guides/subagent-brief.md`（任务包内联配额卡） |
+| **动笔前（治"意义层"AI 味——指标测不到的那一层）** | **`guides/human-exemplars.md`**（人类范本片段库，**按"时刻"组织**：叙述者跳出来／自由间接引语／**故意不解释**／纯闲笔／群体噪音／动作与情绪脱钩／现实锚定／对话不完美／降格幽默／生理写实。**给原文，不给规则**） | 配额卡【四、加法配额】 |
+| **写完后的"不可 hack 判据"** | **删除测试**（随机删 3 处细节，故事是否受损）· **找错测试**（主角哪一步判断错了）——**这两项取代不了，也 hack 不了** | `guides/human-exemplars.md` 使用清单 |
 | **NSFW 模式（contentMode: nsfw）** | **`guides/nsfw-mode.md`** + 注入 `references/prompts/infinite-gen-3.md` | — |
+| **每一次 LLM 调用前（成本纪律，铁律九，两种模式都适用）** | **`guides/token-efficiency.md`**（成本 ≈ 调用次数 × 上下文；一次跑完脚本/一次批量改写/不重读/子代理只读速查卡） | 跑 `scripts/audit_tokens.py <项目目录> --chapters N`（看真实 usage 与调用数是否超标） |
+| **想量化"这套流程到底花了多少 token"** | 跑 `scripts/audit_tokens.py`（读日志真实 usage：cacheRead/input/output + 调用数/改写次数/指南读取次数） | 判据见 `guides/token-efficiency.md` 第四节 |
+| **改动本 SKILL 之后 / 发布或冻结版本之前** | 读 `references/skill-mechanics.md` 第五节（维护检查清单 + 判据） | 跑 `python scripts/audit_release.py --regress`（引用完整性/脚本语法/阈值一致性/调用链闭合/结构完整性/残留检查/**跨脚本一致性**/分离回归，**8 项**一次跑完；退出码 0 才算通过）<br>**动了任何检查项后，再跑 `python scripts/test_guards.py`**（8 例故障注入；"加了守卫"≠"守卫有效"） |
 | 卷终维护圣经 | `guides/bible-template.md`（状态机） | `guides/creation-ledger.md`（台账对账） |
 
 ---

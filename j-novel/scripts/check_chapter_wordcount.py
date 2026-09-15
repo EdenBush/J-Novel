@@ -34,29 +34,24 @@ def count_chinese_words(text: str) -> int:
     return len(chinese_chars)
 
 
-def extract_content_from_chapter(file_path: Path) -> str:
-    """从章节文件中提取正文内容（排除标题等元数据）"""
-    with open(file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+def extract_content_from_chapter(file_path):
+    """取章节正文。**读文件与取正文都必须走 _shared**（2026-09-14 重构）。
 
-    lines = content.split('\n')
+    此前本脚本自己剥 本章概要/章首引子/章节备注 三块，而另外两个脚本各有各的剥法；
+    实测同一章分母 2976 vs 3074 vs 3351 字 → 密度指标互相矛盾。
 
-    # 跳过开头的元数据（如 # 第XX章 标题）
-    content_start = 0
-    for i, line in enumerate(lines):
-        if line.startswith('#') and '章' in line:
-            content_start = i + 1
-            break
-
-    # 提取正文
-    main_content = '\n'.join(lines[content_start:])
-
-    # 排除文末质检摘要
-    summary_idx = main_content.find('【本章质检摘要】')
-    if summary_idx != -1:
-        main_content = main_content[:summary_idx]
-
-    return main_content
+    ⚠️ 2026-09-14 二次修：上一版只把 `extract_body` 统一了，**读文件仍是硬编码
+    `read_text(encoding="utf-8", errors="replace")`** —— 文件若是 GBK/GB18030，
+    会解出一堆 U+FFFD 再被 `errors="replace"` 静默吞掉，中文字数趋近 0，
+    于是**"编码读错"被报成"字数不足"**（比崩溃更危险：用户会去补写正文）。
+    实测同一段内容：UTF-8 报 1000 字，GBK 报 40 字（少算 96%）。
+    现改为 `_shared.read_text`（BOM → 严格 utf-8 → 遗留编码），并纳入自检名单。
+    """
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from _shared import extract_body as _shared_extract_body
+    from _shared import read_text as _shared_read_text
+    return _shared_extract_body(_shared_read_text(file_path))
 
 
 def check_chapter(file_path: str, min_words: int = 3000) -> dict:

@@ -29,13 +29,41 @@ if sys.platform == 'win32':
 
 # 词典
 TRANSITION_WORDS = ['然而', '但是', '可是', '却', '竟', '反倒', '反而', '不过', '然而事实上']
-EMOTION_WORDS = ['愤怒', '悲伤', '恐惧', '痛苦', '绝望', '激动', '委屈', '欣喜', '慌乱', '愧疚',
-                 '心碎', '窒息', '崩溃', '震惊', '不安', '愤怒到', '心如刀绞', '心头一紧', '眼里', '浑身']
+# ⚠ 必须与 check_human_rhythm.py 的 EMOTION_WORDS 完全一致——
+#    曾漂移（aistyle 多出「眼里/浑身/心如刀绞」等 5 词、少 3 词），
+#    导致同一份稿子两个脚本算出不同情绪词密度。audit_release.py 已加一致性检查。
+EMOTION_WORDS = [
+    "愤怒",
+    "悲伤",
+    "恐惧",
+    "痛苦",
+    "绝望",
+    "激动",
+    "委屈",
+    "欣喜",
+    "慌乱",
+    "愧疚",
+    "心碎",
+    "窒息",
+    "崩溃",
+    "震惊",
+    "不安",
+    "心动",
+    "心疼",
+    "难受",
+]
 FUZZY_WORDS = ['仿佛', '似乎', '好像', '宛如', '像是', '如同', '好比', '依稀', '隐约']
 # 顿悟词（AI 爱用"忽然/猛地"制造顿悟感）
 INSIGHT_WORDS = ['忽然', '猛地', '突然', '刹那间', '猛然', '倏地']
 # 明喻标记词（全用明喻 = 比喻审美均质化）
-SIMILE_WORDS = ['像', '如同', '宛如', '犹如', '好似', '仿佛是']
+#
+# ⚠️ 2026-09-14 修：本文件此前**自己定义了一份** SIMILE_WORDS / _SIMILE_LIKE_RX /
+#    count_similes，而且那份 count_similes 是**死代码**——下面算 simile_density 时
+#    用的是 `sum(count_word(body, w) for w in SIMILE_WORDS)`，也就是裸 `str.count`。
+#    于是「像」的负向断言修复**只对 check_human_rhythm 生效**，本脚本仍在把
+#    图像/影像/偶像/摄像/雕像/对象 全算成明喻。
+#    两份已收归 _shared，本文件从下面（正文提取那段）统一导入。
+
 # 动作短语（4-6 字高频动作标签，检测重复调用）
 #
 # ⚠⚠ 这是一份「违禁品清单」，不是「素材库」。⚠⚠
@@ -50,6 +78,19 @@ SIMILE_WORDS = ['像', '如同', '宛如', '犹如', '好似', '仿佛是']
 ACTION_PATTERNS = ['皱起眉头', '握紧拳头', '深吸一口气', '低下头', '抬起头', '别过脸', '转过身',
                    '握了握', '张了张嘴', '抿了抿嘴', '叹了口气', '眨了眨眼', '攥紧', '垂下眼',
                    '攥了攥', '心头一颤', '瞳孔一缩', '嘴角勾起', '喉结动了动']
+
+# 硬性句式：先否定再肯定（相位文档规定"单章出现 1 次即超标"）
+# ⚠️ 实测教训：原版只匹配「不是…而是…」，结果 **AI 学会了绕开"而是"，改用"是"**——
+#    人类 0.087/千字 vs AI 0.011/千字，规则完全失效（AI 反而更少）。
+#    所以这里必须**同时覆盖同句变体与跨句变体**，并用「不是X，是Y」这个口径做主判据。
+HARD_STYLE_PATTERNS = [
+    ('不是X，是Y（同句）', r'不是[^。！？\n]{0,20}?，(?:是|要|在|得|能|会)'),
+    ('不是X。Y是…（跨句）', r'不是[^。！？\n]{0,25}。[^。！？\n]{0,12}?(?:是|要|在|得|能|会|图)'),
+    ('不是…而是…（原版）', r'不是[^。！？\n]{0,20}?而是'),
+]
+# 硬线（每千字）：人类「同句」0.013–0.031、「跨句」0.131–0.187；AI 分别到 1.257 / 1.257
+HARD_STYLE_LIMITS = {'不是X，是Y（同句）': 0.12, '不是X。Y是…（跨句）': 0.40}
+
 # 动作短语密度阈值（每千字）[占位, 中, 高]
 # 人类基线 0.114。3000 字章节命中 1 次 = 0.33（已达人类均值）→ 中；≥0.70（6 倍）→ 高
 ACTION_DENSITY_THRESHOLDS = [0.34, 0.34, 0.70]
@@ -57,7 +98,7 @@ ACTION_DENSITY_THRESHOLDS = [0.34, 0.34, 0.70]
 SIMILE_THRESHOLDS = [1.5, 1.5, 2.0]
 # 情绪词密度区间（每千字）—— 不是越低越好！
 # deai 第二步曾禁止情绪词，结果 AI 只有人类的 1/5–1/2，矫枉过正。低于下限同样不合格。
-EMOTION_RANGE = (0.25, 0.55)
+EMOTION_RANGE = (0.25, 0.50)   # ⚠ 必须与 check_human_rhythm.py 的 emotion hi 一致（曾漂移为 0.55）
 # 通用模板短语（"任何小说都能套的通用词"）
 #
 # 全景诊断（11 部 AI vs 3 部人类）发现：人类的高频短语是**专有名词**（陈汉升/三大文明/黑星军团），
@@ -119,45 +160,40 @@ def find_repeated_phrases(body: str, top_n: int = 8) -> list:
 
 
 
-def extract_body(text: str) -> str:
-    lines = text.split('\n')
-    out, skip_block, skip_qc = [], False, False
-    for raw in lines:
-        line = raw.strip()
-        if line.startswith('【本章质检摘要】'):
-            skip_qc = True
-            continue
-        if skip_qc:
-            if line == '---':
-                skip_qc = False
-            continue
-        if any(line.startswith(b) for b in ('## 本章概要', '## 章节备注', '## 章节概要')):
-            skip_block = True
-            continue
-        if skip_block:
-            if line.startswith('#') or line == '---':
-                skip_block = False
-            if skip_block:
-                continue
-        if line.startswith('## '):
-            continue
-        if line == '---':
-            continue
-        # 合订本常用 ==== 做章节分隔线，不剔除会污染 n-gram 统计
-        if re.fullmatch(r'[=\-—_*·]{3,}', line):
-            continue
-        if re.fullmatch(r'第.{0,8}章.{0,24}', line):
-            continue
-        out.append(line)
-    return '\n'.join(out)
+# ── 正文提取 / 读文件 / 明喻计数 统一走 _shared.py（唯一实现；2026-09-14 重构）──
+# 此前本脚本自带一份 extract_body，与另外两个脚本口径不同：
+# 实测同一章三脚本分母 3351 / 3074 / 2976 字（最大差 12.6%），所有密度指标互相矛盾。
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from _shared import (extract_body as _shared_extract_body,
+                     read_text as _shared_read_text,
+                     SIMILE_WORDS, count_similes)  # noqa: E402,F401
+
+
+def extract_body(text):
+    """委托给共享实现（保号，供本脚本内部调用）。"""
+    return _shared_extract_body(text)
 
 
 def count_word(text: str, word: str) -> int:
     return text.count(word)
 
 
+def read_text_any(path: Path) -> str:
+    """多编码容错读取。**委托给 `_shared.read_text`**（2026-09-14 收归）。
+
+    历史：原实现硬编码 encoding='utf-8'，遇到 GBK/gb18030 的 txt（大量网文范本都是）
+    会直接 UnicodeDecodeError 崩溃，而崩溃退出码 1 与"检测不合格"无法区分。
+
+    ⚠️ 中间态版本自己写了一份"utf-8 优先 + 遗留编码探测"，**能跑但没走共享实现**：
+    它没有 BOM 分支（utf-16/32 文件读不了），而且第 4 处独立编码实现本身就是漂移隐患。
+    现在统一委托 —— `_shared.read_text` 就是"BOM → 严格 utf-8 → 遗留编码"这条链。
+    """
+    return _shared_read_text(path)
+
+
 def analyze_chapter(file_path: Path) -> dict:
-    text = file_path.read_text(encoding='utf-8')
+    text = read_text_any(file_path)
     body = extract_body(text)
     if not body.strip():
         return None
@@ -181,7 +217,9 @@ def analyze_chapter(file_path: Path) -> dict:
     emotion_density = sum(count_word(body, w) for w in EMOTION_WORDS) / total
     fuzzy_density = sum(count_word(body, w) for w in FUZZY_WORDS) / total
     insight_density = sum(count_word(body, w) for w in INSIGHT_WORDS) / total
-    simile_density = sum(count_word(body, w) for w in SIMILE_WORDS) / total
+    # ⚠️ 明喻必须走 count_similes（「像」带负向断言），不能用 `count_word(body, '像')`：
+    #    后者会把 图像/影像/偶像/摄像/雕像/对象 全算成明喻（本文件曾这么错了很久）。
+    simile_density = count_similes(body) / total
 
     # 7. 动作短语（按密度判定，不是绝对次数——长章节自然会多命中几次）
     action_hits = {}
@@ -203,8 +241,21 @@ def analyze_chapter(file_path: Path) -> dict:
             template_hits[w] = n
     template_density = sum(template_hits.values()) / total if total else 0
 
+    # 10. 硬性句式：先否定再肯定（不是X，是Y）
+    # 实测（3 人类 vs 6 部 AI 成品）：
+    #   原版只匹配「不是…而是…」→ 人类 0.087/千字 vs AI 0.011 —— **AI 反而更少，规则完全失效**
+    #     （AI 学会了绕开"而是"，改用"是"）
+    #   「同句 不是X，是Y」    → 人类 0.013–0.031 vs AI 0.000–1.257  ← 可用，取 hard 0.12
+    #   「跨句 不是X。Y是…」  → 人类 0.131–0.187 vs AI 0.247–1.257  ← 可用，取 hard 0.40
+    hard_style = {}
+    for label, rx in HARD_STYLE_PATTERNS:
+        hits = re.findall(rx, body)
+        if hits:
+            hard_style[label] = (len(hits), round(len(hits) / total, 3) if total else 0)
+
     return {
         'file': file_path.name,
+        'hard_style': hard_style,
         'para_cv': round(cv_para, 2),
         'para_n': len(para_lens),
         'dialog_ratio': round(dialog_ratio, 3),
@@ -284,6 +335,27 @@ def print_chapter(r: dict, full: bool = False):
     else:
         print('通用模板短语：无命中 ✓')
 
+    hs = r.get('hard_style', {})
+    if hs:
+        bad = []
+        print('硬性句式（先否定再肯定）:')
+        for label, (cnt, dens) in sorted(hs.items()):
+            lim = HARD_STYLE_LIMITS.get(label)
+            over = lim is not None and dens > lim
+            mark = '✗ 超标' if over else ('提示' if lim is not None else '参考')
+            if over:
+                bad.append(label)
+            print(f'  {label}  {cnt} 次 / {dens}/千字  {mark}'
+                  + (f'（硬线 {lim}）' if lim is not None else ''))
+        if bad:
+            print('  → **单章出现即超标，逐句重写**：把"不是X，是Y"改成直接陈述 Y，'
+                  '或把否定句独立留白（见 human-exemplars.md 技法三「故意不解释」）')
+            print('  ⚠ 注意：只匹配「而是」的原版规则已失效——AI 早已改用「是」绕开它')
+        else:
+            print('  未超标 ✓')
+    return bool(hs and any(
+        dens > HARD_STYLE_LIMITS.get(label, 9e9) for label, (cnt, dens) in hs.items()))
+
 
 def main():
     parser = argparse.ArgumentParser(description='AI 统计指纹检测（分布层面软指纹）')
@@ -297,11 +369,13 @@ def main():
         if not files:
             print('[错误] 未找到章节文件'); sys.exit(1)
         results = []
+        hard_violations = 0
         for f in files:
             r = analyze_chapter(f)
             if r:
                 results.append(r)
-                print_chapter(r)
+                if print_chapter(r):
+                    hard_violations += 1
         # 全书对话比例一致性
         if len(results) >= 3:
             ratios = [r['dialog_ratio'] for r in results]
@@ -316,9 +390,17 @@ def main():
             print(f'[错误] 文件不存在：{args.path}'); sys.exit(1)
         r = analyze_chapter(f)
         if r:
-            print_chapter(r)
+            hard_violations = 1 if print_chapter(r) else 0
         else:
             print('[提示] 无可统计的正文内容')
+            hard_violations = 0
+
+    # 退出码：只有「硬性句式（先否定再肯定）」是硬闸门——相位文档规定"单章出现 1 次即超标"。
+    # 其余指标（转折词/模糊词/顿悟词/明喻/动作/模板短语）保持"报告 + 结合上下文处理"。
+    if hard_violations:
+        print(f'\n✗ 硬性句式超标 {hard_violations} 处 —— 须逐句重写后再提交')
+        sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == '__main__':
