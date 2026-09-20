@@ -84,28 +84,44 @@ def check_chapter(file_path: str, min_words: int = 3000) -> dict:
     }
 
 
-def check_all_chapters(directory: str, pattern: str = '第*.md', min_words: int = 3000) -> list:
-    """检查目录下所有符合模式的章节文件"""
+def check_all_chapters(directory: str, pattern: str = '第*.md', min_words: int = None) -> list:
+    """检查目录下所有章节文件。
+
+    ⚠️ 2026-09-19 修：此前是 `dir_path.glob('第*.md')` —— **只在项目根扫**，
+    而规范要求正文放 `chapters/` → 对**完全合规**的项目一个文件都找不到，
+    打印"没有找到章节文件"后 **`return 0`（假绿）**。
+    Phase 4 唯一那句字数检查命令因此静默失效（且这是同类事故的第三次复发）。
+
+    现在走 `_shared.find_chapter_files`（chapters/ → 正文/ → 根 → 递归兜底）。
+    """
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from _shared import find_chapter_files
+
     dir_path = Path(directory)
     if not dir_path.exists():
         print(f'错误: 目录不存在 - {directory}')
-        return []
+        return None                      # None = 基础设施错误，不是"0 章通过"
 
-    chapter_files = sorted(dir_path.glob(pattern))
-    results = []
+    if min_words is None:
+        from _shared import read_min_words
+        min_words = read_min_words(dir_path)
 
-    for chapter_file in chapter_files:
-        result = check_chapter(str(chapter_file), min_words)
-        results.append(result)
+    chapter_files = find_chapter_files(dir_path)
+    if not chapter_files and pattern != '第*.md':
+        chapter_files = sorted(dir_path.glob(pattern))
 
-    return results
+    return [check_chapter(str(f), min_words) for f in chapter_files]
 
 
-def print_results(results: list, min_words: int = 3000):
-    """打印检查结果"""
+def print_results(results: list, min_words: int = 3000) -> int:
+    """打印检查结果。返回**未达标章数**；`-1` = 没扫到任何章节（fail-closed）。"""
     if not results:
         print('没有找到章节文件')
-        return
+        print('  ⚠ 这不等于"通过"——说明脚本没看见你的稿子。')
+        print('  → 章节正文应放在 `chapters/第NN章-标题.md`（见 phase2-planning.md「项目结构」）。')
+        print('  → 先修结构再重跑，不要当成"没有待办"。')
+        return -1
 
     total_words = 0
     passed = 0
@@ -119,6 +135,7 @@ def print_results(results: list, min_words: int = 3000):
         if not result['exists']:
             print(f'\n[ERROR] {result["file"]}')
             print(f'   {result["message"]}')
+            failed += 1
             continue
 
         total_words += result['word_count']
@@ -134,6 +151,7 @@ def print_results(results: list, min_words: int = 3000):
 
     print('\n' + '-' * 60)
     print(f'总计: {len(results)} 章 | {passed} 章达标 | {failed} 章不足 | 总字数: {total_words:,}')
+    print(f'（下限 {min_words} 字/章，取自 02-写作计划.json 的 minWordsPerChapter）')
     print('-' * 60)
 
     if failed > 0:
@@ -145,11 +163,12 @@ def print_results(results: list, min_words: int = 3000):
         print('   - 次要情节穿插（配角片段/暗线推进/伏笔埋设）')
         print('   - 感官维度叠加')
         print('\n   参考: references/guides/chapter-craft.md')
+    return failed
 
 
 def main():
     """主函数"""
-    min_words = 3000
+    min_words = None            # None = 自动（命令行 > 项目配置 > 3000）
 
     if len(sys.argv) < 2:
         print('用法:')
@@ -161,22 +180,45 @@ def main():
         print('  python check_chapter_wordcount.py novel-output/故事/第01章.md 3500')
         print('  python check_chapter_wordcount.py --all novel-output/故事')
         print('  python check_chapter_wordcount.py --all novel-output/故事 3500')
-        return
+        print('')
+        print('退出码: 0=全部达标 / 1=有章节字数不足 / 2=没扫到章节或目录不存在（fail-closed）')
+        return 2
 
     if sys.argv[1] == '--all':
         if len(sys.argv) < 3:
             print('错误: 使用 --all 时需要指定目录路径')
-            return
+            return 2
         directory = sys.argv[2]
-        min_words = int(sys.argv[3]) if len(sys.argv) > 3 else 3000
+        if len(sys.argv) > 3:
+            min_words = int(sys.argv[3])
         results = check_all_chapters(directory, min_words=min_words)
-        print_results(results, min_words)
-    else:
-        file_path = sys.argv[1]
-        min_words = int(sys.argv[2]) if len(sys.argv) > 2 else 3000
-        result = check_chapter(file_path, min_words)
-        print_results([result], min_words)
+        if results is None:
+            return 2
+        actual_min = min_words
+        if actual_min is None:
+            import os as _os, sys as _sys
+            _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+            from _shared import read_min_words
+            actual_min = read_min_words(Path(directory))
+        failed = print_results(results, actual_min)
+        if failed < 0:
+            return 2
+        return 1 if failed > 0 else 0
+
+    file_path = sys.argv[1]
+    if len(sys.argv) > 2:
+        min_words = int(sys.argv[2])
+    if min_words is None:
+        import os as _os, sys as _sys
+        _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+        from _shared import read_min_words
+        min_words = read_min_words(Path(file_path).parent)
+    result = check_chapter(file_path, min_words)
+    failed = print_results([result], min_words)
+    if failed < 0:
+        return 2
+    return 1 if failed > 0 else 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

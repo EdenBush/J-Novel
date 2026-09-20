@@ -148,6 +148,144 @@ def count_similes(flat: str) -> int:
     return sum(flat.count(w) for w in SIMILE_WORDS if w != '像') + len(_SIMILE_LIKE_RX.findall(flat))
 
 
+# ──────────────────────────────────────────────────────────────
+# 章节目录解析（2026-09-19 收归共享）
+# ──────────────────────────────────────────────────────────────
+# 事故：规范要求正文放 `chapters/`，但 check_chapter_wordcount.py 的 --all
+# 只在**项目根** `glob('第*.md')` → 对合规项目一个文件都找不到 →
+# 打印"没有找到章节文件" → **退出码 0（假绿）**。
+# Phase 4 逐章查字数的唯一命令因此形同虚设，且不报错。
+# 这是"闸门看不见稿子却报通过"的**第三次**复发（前两次：`正文/` 目录、`index` 字段）。
+#
+# 修法：目录解析收归一处，所有脚本共用；**找不到任何章节 = 失败**，不是"没事发生"。
+_CHAPTER_DIRS = ('chapters', '正文', '章节目录')
+_CHAPTER_GLOB = '第*.md'
+_BACKUP_SUFFIX = ('.原稿备份.md', '.bak.md', '.旧.md', '.orig.md')
+
+
+def find_chapter_files(root) -> list:
+    """在项目里找章节正文文件。返回**排序后**的 Path 列表（排除备份/元数据）。
+
+    查找顺序：`chapters/` → `正文/` → `章节目录/` → 项目根 → **递归兜底**。
+    找到第一个非空结果即返回（与 check_batch_gate 的兼容范围一致）。
+    """
+    from pathlib import Path
+    root = Path(root)
+    if root.is_file():
+        return [root]
+
+    def _clean(files):
+        out = []
+        for f in files:
+            n = f.name
+            if any(n.endswith(s) for s in _BACKUP_SUFFIX):
+                continue
+            # `第01章-x.meta.md` 是元数据，不是正文
+            if n.endswith('.meta.md'):
+                continue
+            # 排除 chapters/_meta/ 等子目录里的东西（只认规范位置）
+            try:
+                rel = f.relative_to(root)
+            except ValueError:
+                rel = f
+            if any(part.startswith('_') for part in rel.parts[:-1]):
+                continue
+            out.append(f)
+        return sorted(out, key=lambda p: str(p))
+
+    for d in _CHAPTER_DIRS:
+        sub = root / d
+        if sub.is_dir():
+            hit = _clean(list(sub.glob(_CHAPTER_GLOB)))
+            if hit:
+                return hit
+    hit = _clean(list(root.glob(_CHAPTER_GLOB)))
+    if hit:
+        return hit
+    # 兜底：递归（老项目结构不规范时，宁可找到也不要静默空手）
+    return _clean(list(root.rglob(_CHAPTER_GLOB)))
+
+
+def read_min_words(project) -> int:
+    """从项目的 `02-写作计划.json` 读 `minWordsPerChapter`。
+
+    事故：脚本默认 `min_words=3000` 硬编码，而项目配置是 2000 ——
+    2200 字的**合规章节会被判 FAIL**，Agent 于是去补写到 3000+（虚耗且改变文风）。
+    读不到配置时回落到 3000（旧默认，保持向后兼容）。
+    """
+    import json
+    from pathlib import Path
+    root = Path(project)
+    for probe in (root / '02-写作计划.json',
+                  root.parent / '02-写作计划.json',
+                  root / 'chapters' / '02-写作计划.json'):
+        if not probe.is_file():
+            continue
+        try:
+            data = json.loads(read_text(probe))
+        except Exception:
+            continue
+        for key in ('minWordsPerChapter', 'minWords', 'wordsPerChapter'):
+            v = data.get(key)
+            if isinstance(v, int) and v > 0:
+                return v
+        # 兼容：章节数组里第一个有 minWords 的
+        for ch in (data.get('chapters') or []):
+            if isinstance(ch, dict):
+                v = ch.get('minWords') or ch.get('minWordsPerChapter')
+                if isinstance(v, int) and v > 0:
+                    return v
+    return 3000
+
+
+# ──────────────────────────────────────────────────────────────
+# 章节边界「人工放行」解析（2026-09-19 收归共享）
+# ──────────────────────────────────────────────────────────────
+# 事故：check_continuity.py 用**严格**正则（`第\d+→\d+章`）→ 模板行
+# `boundary-waived: 第N→N+1章，理由：该钩子第M章回收` 的 `N`/`M` 不是数字 →
+# 正确地**不豁免**（exit 1）。而 check_batch_gate.py 用 `(.{8,})` **宽松**正则 →
+# 同一行匹配上了 → `waived = True` → 报"✓ 闸门通过"。
+# **宽松层覆盖了严格层**，一条从文档里抄来的**模板示例**豁免了全书的边界检查。
+#
+# 修法：两个脚本走同一个解析器；占位符一律拒绝；豁免**按章号对**逐条扣。
+_WAIVER_RX = re.compile(r'boundary-waived\s*[:：]\s*第\s*(\d{1,4})\s*[→\->—~至]{1,2}\s*(\d{1,4})\s*章')
+_ANY_WAIVER = re.compile(r'boundary-waived\s*[:：]\s*(.{0,60})')
+
+
+def parse_waivers(text: str):
+    """解析台账里的 boundary-waived 记录。
+
+    返回 `(pairs, problems)`：
+      pairs    —— `{(8, 9)}` 形式的**合法**放行对
+      problems —— 形似放行但**无效**的记录（占位符章号 / 理由 <8 字），
+                  必须报出来——否则"写了一条假放行"和"没写"都无法区分。
+    """
+    pairs, problems = set(), []
+    for m in _ANY_WAIVER.finditer(text):
+        raw = m.group(1).strip()
+        mm = _WAIVER_RX.search(m.group(0))
+        if not mm:
+            first = raw[:40] or '(空)'
+            problems.append(
+                f'放行记录无效（章号必须是具体数字）："{first}" —— '
+                f'`第N→N+1章` 这种**文档模板**不能当放行用。')
+            continue
+        a, b = int(mm.group(1)), int(mm.group(2))
+        if b != a + 1:
+            problems.append(f'放行记录无效（第{a}→{b}章不构成相邻边界）')
+            continue
+        # 理由长度：从「理由」之后算起
+        reason = ''
+        rm = re.search(r'理由\s*[:：]\s*(.*)', m.group(0))
+        if rm:
+            reason = rm.group(1).strip()
+        if len(reason) < 8:
+            problems.append(f'放行记录理由过短（第{a}→{b}章，<8 字视为无效放行）')
+            continue
+        pairs.add((a, b))
+    return pairs, problems
+
+
 if __name__ == '__main__':
     import sys, io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')

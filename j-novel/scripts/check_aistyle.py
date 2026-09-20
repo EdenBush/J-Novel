@@ -123,6 +123,37 @@ COMMON_TEMPLATE = [
     # 高频连接模板
     '一边一边',
 ]
+
+# ── 万能情绪 / 恐惧模板（novel-humanize 第五节；实测人类 0.00–0.02/千字，AI 0.00–0.12）──
+# 单独成表的原因：这批是**小说专属标准件**，人类几乎从不使用；而上表 COMMON_TEMPLATE
+# 里混着"一个人/走廊里"这类**伪具体**，两者性质不同（一个是修辞标准件，一个是伪具体指代）。
+# ⚠️ 这张表是**逐词实测**筛出来的（人类 3 部 × 60 万字 vs AI 3 样本全书）。
+# 来源清单（novel-humanize 第五节）原有 44 个词，实测后**只有 10 个能分离人类与 AI**：
+#   · 11 个人类用得**比 AI 还多** → 必须剔除（否则又是"命中即换"型误伤）
+#        忍不住(人类 0.25 vs AI 0.02) · 不禁(0.05 vs 0.00) · 头皮发麻 · 眼中闪过一丝 ·
+#        忽然意识到 · 突然意识到 · 终于明白 · 脑海中闪过 · 良久 · 顿了几秒 · 身体一晃
+#   · 23 个**两边都是 0**（词太罕见，无信号）→ 可作"写作时避免"的提示，
+#        但**不能当判据**。见 ai-cliche-blacklist.md 第三节的三档分类。
+# 下面 10 个是 human≈0 且 AI>0 的：human 列 → AI 列（/千字）
+# ⚠️ **这是弱信号，不是闸门。** 实测：人类全书 0.007–0.032/千字、AI 0.081–0.201，
+# 方向对（AI 高 3–30 倍），但绝对量极小——3000 字章通常 0–1 次命中，**不足以做逐章硬判**。
+# 所以只做非阻塞提示。真正好用的地方是**写作时**（别写成标准件），不是**判稿时**。
+#
+# 另：来源清单里的 半晌 / 空气中弥漫 / 目光平静 已被剔除——人类三部都用了
+#（超神 半晌×21、空气中弥漫×7；重生啊 目光平静×4），**属于人类正常用词**。
+CLICHE_EMOTION = [
+    '空气凝固',     # 人类 0.00 → AI 0.06
+    '心跳漏了一拍',   # 人类 0.002 → AI 0.06
+    '后背发凉',     # 人类 0.007 → AI 0.04
+    '指节泛白',     # 人类 0.00 → AI 0.02
+    '心跳如鼓',     # 人类 0.00 → AI 0.01
+    '指节攥得发白',   # 人类 0.00 → AI 0.01
+    '脊背发凉',     # 人类 0.00 → AI 0.01
+]
+# 密度提示线（**非阻塞**）：人类 ≈0、AI 0.01–0.09，绝对量都小，
+# 所以不做硬闸门（会变成假闸门），只提示。出现 ≥3 处不同模板时额外警告"成套出现"。
+CLICHE_SOFT_DENSITY = 0.15
+CLICHE_SOFT_KINDS = 5
 TEMPLATE_MIN_COUNT = 2        # 单个模板短语出现 ≥2 次才列出
 TEMPLATE_SOFT_DENSITY = 1.5   # 总模板密度（/千字）超过此值提示模板化（人类 0.55–1.22，AI 1.36–2.07）
 
@@ -131,6 +162,21 @@ PHRASE_MIN_COUNT = 3      # 出现 ≥3 次才报告
 PHRASE_NGRAMS = (5, 6, 7, 8)
 # 功能字（过滤含这些字的 n-gram，减少误报）
 PHRASE_FUNC_CHARS = set('的了着在是不是也就都很还又要和会没说有把让对从到么吧吗呢啊这那')
+
+# 半角引号（ASCII 直引号）—— **硬闸门，零容忍**
+# 实测：人类三部参考 **0%**（0 处），AI 样本 0–6.45%。
+# 这是**生产级事故**：子代理写 .md 时天然输出 ASCII `"`，
+# 会导致 check_human_rhythm 的「句首引号占比」直接判 0.0%（脚本只认全角/直角引号）。
+# 2026-09-16 起：正文里出现任何一个 ASCII `"` 即判不合格。
+ASCII_QUOTE_CHARS = ('"', "'")      # 半角双引号 + 半角单引号（后者只在对话场景可疑）
+ASCII_QUOTE_HARD = 1                # ≥1 处即不合格
+
+# 汉字↔半角数字之间夹空格（2026-09-19 新增，来自一次盲评）
+#   编辑评委靠肉眼抓到「第 12 回」「408 号」「死 4 回」。实测密度（每千字）：
+#     人类三部 0.03 / 0.15 / **0.00**  ｜ AI 对照 0.04  ｜ 本体系产出 **1.77 / 3.39**
+#   ——**差 12–100 倍**，是目前分离度最高的格式类指纹之一。
+#   根因：英文排版习惯（数字两侧留空格）漏进中文正文。中文出版惯例是**不留**（"10版本""60w经验"）。
+CJ_DIGIT_SPACE_HARD = 0.5           # 每千字；人类最高 0.15，取 3× 余量
 
 
 def find_repeated_phrases(body: str, top_n: int = 8) -> list:
@@ -253,8 +299,30 @@ def analyze_chapter(file_path: Path) -> dict:
         if hits:
             hard_style[label] = (len(hits), round(len(hits) / total, 3) if total else 0)
 
+    # 11. 万能情绪/恐惧模板（小说专属标准件）
+    cliche_hits = {}
+    for w in CLICHE_EMOTION:
+        n = body.count(w)
+        if n >= 1:
+            cliche_hits[w] = n
+    cliche_density = sum(cliche_hits.values()) / total if total else 0
+
+    # 12. 半角引号（ASCII 直引号）—— 硬闸门
+    ascii_dq = body.count('"')
+    cj_space = len(re.findall(r'[\u4e00-\u9fff]\s+[0-9]|[0-9]\s+[\u4e00-\u9fff]', body))
+    cj_space_density = round(cj_space / max(1e-9, len(body) / 1000.0), 2)
+    ascii_sq = body.count("'")
+    # 全角/直角引号（用于对照：若全角也为 0 且 ASCII > 0，说明引号样式整体写错了）
+    full_q = body.count('\u201c') + body.count('\u201d') + body.count('\u300c') + body.count('\u300d')
+
     return {
         'file': file_path.name,
+        'ascii_dq': ascii_dq,
+        'cj_space': cj_space, 'cj_space_density': cj_space_density,
+        'ascii_sq': ascii_sq,
+        'full_quote_n': full_q,
+        'cliche_hits': cliche_hits,
+        'cliche_density': round(cliche_density, 3),
         'hard_style': hard_style,
         'para_cv': round(cv_para, 2),
         'para_n': len(para_lens),
@@ -335,6 +403,42 @@ def print_chapter(r: dict, full: bool = False):
     else:
         print('通用模板短语：无命中 ✓')
 
+    # ── 半角引号（硬闸门）──
+    dq, sq, fq = r.get('ascii_dq', 0), r.get('ascii_sq', 0), r.get('full_quote_n', 0)
+    if dq:
+        print(f'半角双引号 `"`  {dq} 处  ✗ **不合格（零容忍）**')
+        print('  → 对话一律用中文引号 `“ ”`（或项目统一用 `「」`，但必须全书一致）。')
+        print('    根因：写 .md 时天然输出 ASCII 引号，会让"句首引号占比"指标直接判 0.0%。')
+        if fq == 0:
+            print('    ⚠ 全角引号 0 处 + 半角 %d 处 = **整章引号样式全错**，不是漏改几处' % dq)
+    else:
+        print(f'引号样式 ✓（全角/直角引号 {fq} 处，半角 0 处）')
+
+    # ── 汉字↔半角数字夹空格（硬闸门）──
+    cjs, cjsd = r.get('cj_space', 0), r.get('cj_space_density', 0.0)
+    if cjsd > CJ_DIGIT_SPACE_HARD:
+        print('汉字/数字间夹半角空格  %d 处 / %s 千字  ✗ **不合格**（硬线 %s，人类最高 0.15）'
+              % (cjs, cjsd, CJ_DIGIT_SPACE_HARD))
+        print('  → 中文字与阿拉伯数字之间**不留空格**：写“第12回”“408号”“4回”，不写“第 12 回”。')
+        print('    根因：英文排版习惯漏进中文正文；盲评时编辑评委一眼就看出来了。')
+    else:
+        print('汉字/数字夹空格 ✓（%d 处 / %s 千字）' % (cjs, cjsd))
+
+    # ── 万能情绪/恐惧模板（提示，非阻塞）──
+    ch = r.get('cliche_hits', {})
+    if ch:
+        top = sorted(ch.items(), key=lambda x: -x[1])[:8]
+        over = r['cliche_density'] > CLICHE_SOFT_DENSITY or len(ch) >= CLICHE_SOFT_KINDS
+        print(f'万能情绪模板：{"、".join(f"{k}×{v}" for k, v in top)}')
+        print(f'  → {len(ch)} 种 / {r["cliche_density"]}/千字 '
+              f'{"△ **成套出现**（这是最容易辨认的 AI 指纹）" if over else "提示"}'
+              f'（人类基线 0.00–0.02，AI 0.00–0.12）')
+        print('     ⚠ 这些是"标准件"——人类几乎不用。换成**只有这个人物会做的**特定动作：')
+        print('       有人紧张时反复清嗓子，有人不停摸耳垂，有人把手机翻过来又翻回去。')
+        print('       详见 ai-cliche-blacklist.md 第三节')
+    else:
+        print('万能情绪模板：无命中 ✓（最好状态）')
+
     hs = r.get('hard_style', {})
     if hs:
         bad = []
@@ -353,8 +457,21 @@ def print_chapter(r: dict, full: bool = False):
             print('  ⚠ 注意：只匹配「而是」的原版规则已失效——AI 早已改用「是」绕开它')
         else:
             print('  未超标 ✓')
-    return bool(hs and any(
+    bad_hard_style = bool(hs and any(
         dens > HARD_STYLE_LIMITS.get(label, 9e9) for label, (cnt, dens) in hs.items()))
+    # 半角引号 = 生产级格式事故，零容忍（人类 0%）
+    bad_quote = r.get('ascii_dq', 0) >= ASCII_QUOTE_HARD
+    # 汉字/数字夹空格 = 中文排版惯例错误（人类 0.00–0.15/千字）
+    bad_cjspace = r.get('cj_space_density', 0) > CJ_DIGIT_SPACE_HARD
+    if bad_hard_style or bad_quote or bad_cjspace:
+        print()
+        if bad_quote:
+            print('✗ 不合格项：半角双引号（零容忍）')
+        if bad_cjspace:
+            print('✗ 不合格项：汉字与数字间夹半角空格（中文出版惯例不留空格）')
+        if bad_hard_style:
+            print('✗ 不合格项：硬性句式（不是X，是Y）超标')
+    return bad_hard_style or bad_quote or bad_cjspace
 
 
 def main():

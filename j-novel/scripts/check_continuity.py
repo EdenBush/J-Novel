@@ -98,6 +98,16 @@ def _warn_names_missing(why):
 
 _NAMES_WARNED = False
 
+# 人名的**反向词表**：以这些词结尾的候选是"设定术语/字段标签"，不是人。
+# 实测污染源：内在需求 / 外在目标 / 四种冲突轴 / 人物弧光 / 核心缺陷 …
+# 保守做法：只按**结尾**判（真名以"目标/需求/轴"结尾的概率≈0），
+# 避免误杀同时含这些字的人名（如"陈目标"不会出现，但"马斯克"也不受影响）。
+_TERM_SUFFIX = re.compile(
+    r'(需求|目标|冲突|弧光|结构|逻辑|设定|规则|主题|母题|视角|节奏|基调|风格|'
+    r'机制|体系|线索|反转|悬念|伏笔|张力|动机|性格|缺陷|成长|转变|阶段|层次|'
+    r'维度|要素|步骤|方法|原则|清单|表格|模板|字段|说明|备注|概述|总览|分析|'
+    r'建议|要点|核心|关键|重点|关系|背景|经历|外貌|身材|能力|技能|结局|定位|轴)$')
+
 
 def load_names(char_file):
     """从 00-人物档案.md 提取角色名（### 标题 + **加粗名** 两种来源）。
@@ -108,10 +118,14 @@ def load_names(char_file):
         return set()
     t = read_text(char_file)
     names = set()
-    block = re.compile(r'反派|主角|配角|龙套|后宫|阵容|关系网|对手|阵营|势力|组织|团队|角色')
+    block = re.compile(r'反派|主角|配角|龙套|后宫|阵容|关系网|对手|阵营|势力|组织|团队|角色|其他|登场|总览|设定|关系')
     for line in t.split('\n'):
         cand = None
-        m = re.match(r'^###\s+(.+?)\s*$', line.strip())
+        # ⚠️ 2026-09-15 修：**层级要放宽到 ##–####**。
+        # 实测真实项目用 `## 林迟（主角）· 27 岁 · 男`（H2），而这里只认 `###` →
+        # **四个主角一个都没解析到**，边界检测因此全程"钩子区未检测到已知角色名 → 跳过"，
+        # 却因为另有一个垃圾名（从加粗字段误抓）而**不触发"空集"警告** —— 静默失效。
+        m = re.match(r'^#{2,4}\s+(.+?)\s*$', line.strip())
         if m:
             cand = m.group(1).strip()
         else:
@@ -126,15 +140,77 @@ def load_names(char_file):
         cand = re.split(r'[·]', cand)[0].strip()            # 只取"名"，不取"姓"
         if not cand or block.search(cand) or len(cand) > 12:
             continue
+        # 人名不该带这些字（防"床上的逻辑"这类从散文里误抓的短语）
+        if re.search(r'[的地得了着过说想著想要是]', cand) or len(cand) < 2:
+            continue
+        # ── 2026-09-19 修：把「设定术语」挡在人名之外 ──
+        # 实测某项目从人物档案里抓出 5 个假人名，直接污染边界报告：
+        #   '先给结论，再给理由'（含逗号）· '星穹互娱 / 系统'（含空格斜杠）
+        #   '内在需求' · '外在目标' · '四种冲突轴'（纯中文的**字段标签**）
+        # 前者靠"人名不含标点"挡，后者靠"术语后缀"挡。
+        if re.search(r'[，,、。；;：:！!？?/\\|（）()\[\]【】\s0-9]', cand):
+            continue
+        if _TERM_SUFFIX.search(cand):
+            continue
+        if len(cand) < 2 or len(cand) > 6:      # 中文人名 2–4 字为主，放宽到 6
+            continue
         names.add(cand)
     if not names:
-        _warn_names_missing('格式不匹配')
+        _warn_names_missing('格式不匹配或角色名均被过滤')
     return names
 
 
 def chapter_files(proj):
-    files = sorted(Path(proj).glob('第*.md'), key=lambda p: p.name)
-    return [f for f in files if re.match(r'第\d+章', f.name)]
+    """找章节文件。**递归子目录**——SKILL 从未规定章节目录（实测真实项目放 `正文/`），
+    只扫根目录会让边界检测"看不到章节"，进而误报"章节文件不足 2 个"。
+
+    ⚠️ 2026-09-19 修：此前用 `re.match(r'第\\d+章', f.name)` 过滤，
+    会把**备份稿**和**元数据文件**一起收进来：
+        · `第01章-xxx.原稿备份.md` → 同一个"第01章"出现两次
+          → 边界报告里冒出 `第01章 结尾 → 第01章 开头`（自己接自己）这种假边界
+        · `chapters/_meta/第01章-xxx.meta.md` → 元数据被当成正文
+    而 `seen` 按**文件名**去重，备份稿与正文不同名 → 去重挡不住。
+    现改为委托 `_shared.find_chapter_files`（唯一真相源，自带排除规则）。
+    """
+    proj = Path(proj)
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from _shared import find_chapter_files as _find
+        files = _find(proj)
+        if files:
+            return files
+    except Exception:
+        pass
+    # 兜底（_shared 不可用时）：保留旧行为，但补上备份/元数据排除
+    files, seen = [], set()
+    for pat in ('第*.md', '正文/第*.md', 'chapters/第*.md', '*/第*.md'):
+        for f in sorted(proj.glob(pat), key=lambda x: x.name):
+            if not f.is_file() or f.name in seen:
+                continue
+            if not re.match(r'第\d+章', f.name):
+                continue
+            if f.name.endswith(('.meta.md', '.原稿备份.md', '.bak.md', '.旧.md', '.orig.md')):
+                continue
+            if any(part.startswith('_') for part in f.relative_to(proj).parts[:-1]):
+                continue
+            seen.add(f.name)
+            files.append(f)
+    return sorted(files, key=lambda x: x.name)
+
+
+def find_char_file(proj):
+    """找人物档案。兼容 `00-人物档案.md`（规范）/ `01-人物档案.md`（实测项目用这个）
+    以及任意含"人物档案"的 md——**找不到才是问题，命名不该是问题**。"""
+    proj = Path(proj)
+    for name in ('00-人物档案.md', '01-人物档案.md', '人物档案.md'):
+        f = proj / name
+        if f.exists():
+            return f
+    hits = [f for f in proj.glob('*人物*档案*.md') if f.is_file()]
+    if hits:
+        return sorted(hits)[0]
+    hits = [f for f in (proj / '正文').glob('*人物*.md')] if (proj / '正文').is_dir() else []
+    return sorted(hits)[0] if hits else None
 
 
 def analyze_boundary(prev_body, cur_body, names):
@@ -157,7 +233,7 @@ def main():
         print(f'[错误] 目录不存在：{proj}')
         sys.exit(2)
 
-    names = load_names(proj / '00-人物档案.md')
+    names = load_names(find_char_file(proj))
     files = chapter_files(proj)
     if len(files) < 2:
         print('[错误] 章节文件不足 2 个')
@@ -237,7 +313,16 @@ def main():
             print(f'     · 第{a}→{b}章')
         print('  判断标准：这个钩子是"该接没接"（bug），还是"刻意留到后章"（正常）？')
         print('  **判定为正常的，在 05-创作台账.md 写一行放行记录**（不要绕过闸门）：')
-        print('     boundary-waived: 第N→N+1章，理由：该钩子第M章回收（理由 ≥8 字）')
+        # ⚠️ 2026-09-19：这里的示例**必须是本次真实命中的章号**。
+        # 此前硬编码 `第N→N+1章，理由：该钩子第M章回收` —— Agent 会把提示文字**原样抄进台账**，
+        # 而那条模板在 check_batch_gate 的宽松正则下匹配成功 → 全书边界检查被一条
+        # 从提示文字里抄来的**假放行**整条豁免（实测真实项目就是这么中招的）。
+        # **提示文字不能教人写占位符**，否则它就是事故的源头。
+        if unmatched:
+            _a, _b = unmatched[0]
+            print(f'     boundary-waived: 第{_a}→{_b}章，理由：该钩子第{_b + 3}章回收（理由 ≥8 字，章号必须是数字）')
+        else:
+            print('     boundary-waived: 第8→9章，理由：该钩子第11章回收（理由 ≥8 字，章号必须是数字）')
     elif not truly_waived:
         print('✓ 未发现明显的钩子悬空。')
     sys.exit(1 if hard_hits else 0)

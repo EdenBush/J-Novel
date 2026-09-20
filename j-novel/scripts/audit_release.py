@@ -38,6 +38,43 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- 关键工具清单
 # 每项必须 ≥2 处调用点（注册处 + 实际触发处）。1 处 = 定义了但没接上 = 死工具。
+# ══════════════════════════════════════════════════════════════════
+# 规则传导表（2026-09-16 新增）
+#
+# **查什么**：子代理只读 `quick-reference-card.md`，所以凡在源指南里改的规则，
+# 速查卡里必须有一份等价表述 —— 否则"改了指南"对子代理等于"什么都没改"。
+#
+# 每项 = (规则名, 源指南, 源标志正则, 速查卡标志正则)
+# 速查卡允许换措辞，所以两侧用不同的等价正则。
+# ⚠️ 新增/修改源指南里的关键规则后，**同步补一行到这里**，否则守卫管不到它。
+# ══════════════════════════════════════════════════════════════════
+PROPAGATION_RULES = [
+    ('作者在场·自检法',      'narrative-craft.md', r'这里有一个人吗', r'这里有一个人吗'),
+    ('作者在场·禁止同构',    'narrative-craft.md', r'禁止同构', r'禁止同构'),
+    ('作者在场·必须挂钩',    'narrative-craft.md', r'付什么租', r'付什么租'),
+    ('对话标签用「道」',      'dialogue-writing.md', r'道', r'用「\*\*道'),
+    ('对话标签·上限',        'dialogue-writing.md', r'1/3|2/3|不要每句都挂', r'1/3|2/3|不要每句都挂'),
+    ('单句成段·适用对象',    'narrative-craft.md', r'对话.*情绪重音|主要用在', r'一句一段'),
+    ('单句成段·禁纯景物连排', 'narrative-craft.md', r'纯景物|空镜蒙太奇', r'纯景物|空镜蒙太奇'),
+    ('毛边：判据制',         'human-quota.md', r'付房租|毛边', r'毛边'),
+    ('删掉它故事变差了吗',    'human-quota.md', r'删掉它', r'删掉它|付什么租'),
+    ('≥1 句 ≥100 字超长句',  'human-rhythm.md', r'100 字', r'100 字'),
+    ('人类区间命中率',       'human-rhythm.md', r'命中率', r'命中率'),
+    ('工艺四定',            'narrative-craft.md', r'章末型', r'章末型'),
+    ('情绪三种写法配比',      'human-rhythm.md', r'三种写法|直说', r'三种写法'),
+    ('称呼即关系刻度',       'dialogue-writing.md', r'称呼', r'称呼'),
+    ('独立质检子代理',       'review-agent.md', r'四项测试|同构测试', r'同构测试|独立质检子代理'),
+    # ── novel-humanize 融合（2026-09-16）────────────────────────────────
+    ('私人细节·专属判据',     'humanize-toolkit.md', r'只有这个人|专属感', r'私人细节'),
+    ('情绪体感化',           'humanize-toolkit.md', r'情绪体感化|他很X|他很 X', r'情绪体感化'),
+    ('主角必须犯错',         'humanize-toolkit.md', r'主角必须犯错|判断错', r'主角必须犯错|判断错'),
+    ('内容注入·挑 3-5 招',    'humanize-toolkit.md', r'3[–-]5 招', r'3[–-]5 招'),
+    ('半角引号零容忍',        'ai-cliche-blacklist.md', r'半角双引号', r'ASCII'),
+    ('破折号趋向清零',        'ai-cliche-blacklist.md', r'破折号', r'破折号'),
+    ('万能情绪模板黑名单',     'ai-cliche-blacklist.md', r'空气凝固', r'空气凝固'),
+]
+
+
 KEY_TOOLS = [
     'token-efficiency', 'skill-mechanics', 'audit_tokens', 'human-exemplars',
     'volume-arc-planning', 'chained-pipeline', 'check_batch_gate',
@@ -95,19 +132,34 @@ CJK = re.compile(r'[\u4e00-\u9fff]')
 
 
 def read_text(p: Path) -> str:
+    """读文件并**归一化换行符为 \\n**。
+
+    ⚠️ 2026-09-15 修（这个坑让一整层守卫静默失效）：
+    本函数用 `read_bytes().decode()` 读，**不做换行转换**；而 Windows 上写的文件是 CRLF。
+    于是所有形如 `` ```\\nxxx `` 的正则都匹配不到 `` ```\\r\\nxxx `` ——
+    新加的"配额卡分叉"守卫因此**从头就是死的**（跑起来报 0 冲突，看起来在工作）。
+    `Path.read_text()` 之所以没这个问题，是因为文本模式会自动做 universal newlines；
+    用 bytes 读就必须自己转。**凡是要对文件内容做正则匹配的，都必须走归一化后的文本。**
+    """
     raw = p.read_bytes()
+    s = None
     try:
-        s = raw.decode('utf-8')
-        if '\ufffd' not in s:
-            return s
+        _s = raw.decode('utf-8')
+        if '\ufffd' not in _s:
+            s = _s
     except Exception:
         pass
-    for enc in ('gb18030', 'gbk', 'big5'):
-        try:
-            return raw.decode(enc)
-        except Exception:
-            continue
-    return raw.decode('utf-8', errors='ignore')
+    if s is None:
+        for enc in ('gb18030', 'gbk', 'big5'):
+            try:
+                s = raw.decode(enc)
+                break
+            except Exception:
+                continue
+    if s is None:
+        s = raw.decode('utf-8', errors='ignore')
+    # CRLF / CR → LF（否则以 \n 结尾的正则会全部失配）
+    return s.replace('\r\n', '\n').replace('\r', '\n')
 
 
 # ---------------------------------------------------------------- 文档缓存（性能）
@@ -530,6 +582,150 @@ def check_cross_script(root: Path):
             if uses <= 1:
                 issues.append(f'{f} 定义了 {fname}() 但从未被调用 —— '
                               f'"我加了个修复"与实际生效是两件事')
+
+    # ══════════ 执行层一致性（2026-09-15 新增）══════════
+    # 上面几层查的是"脚本与文档是否一致"。这一层查**"Agent 运行时拿到的东西是否一致"**——
+    # 因为子代理只读任务包，任务包错了，前面所有闸门都白设。
+
+    # ① 任务包的配额卡必须是规范卡的**逐行副本**（副本一定会漂，已实测：
+    #    内联卡写 ≥2–3 处、同一文件第 10 条写 ≥5 处、规范卡写"2–3 是底线不是目标"）
+    def _quota_lines(txt):
+        m = re.search(r'```\n(本章写作配额.*?)\n```', txt, re.S)
+        if not m:
+            return None
+        return [l.strip() for l in m.group(1).split('\n') if l.strip()]
+
+    _card = read_text(root / 'references' / 'guides' / 'quick-reference-card.md')
+    _brief = read_text(root / 'references' / 'guides' / 'subagent-brief.md')
+    _cq, _bq = _quota_lines(_card), _quota_lines(_brief)
+    if _cq and _bq:
+        if _cq != _bq:
+            only_c = [l for l in _cq if l not in _bq]
+            only_b = [l for l in _bq if l not in _cq]
+            issues.append(
+                '任务包的配额卡与规范卡不一致（分叉）：'
+                f'规范卡独有 {len(only_c)} 行 / 任务包独有 {len(only_b)} 行'
+                + (f' ｜ 例：任务包独有「{only_b[0][:36]}」' if only_b else ''))
+    elif _cq and not _bq:
+        issues.append('任务包里找不到逐字复制的配额卡（应复制 quick-reference-card.md 的【零】整块）')
+
+    # ⑥ 孤儿指南：每本 guide 都必须至少有一个读点（guide-index / SKILL.md / flows）
+    #    "写了没人读"的指南 = 不存在。实测 41 本全部有读点，这条是防将来退化。
+    _entry = read_text(root / 'references' / 'guide-index.md') + read_text(root / 'SKILL.md')
+    _flows_all = ''.join(read_text(f) for f in (root / 'references' / 'flows').glob('*.md'))
+    _orphans = []
+    for _g in sorted((root / 'references' / 'guides').glob('*.md')):
+        if _g.name in _entry or _g.name in _flows_all:
+            continue
+        _orphans.append(_g.name)
+    if _orphans:
+        issues.append('孤儿指南（从任何读点都到不了，等于不存在）：' + '、'.join(_orphans))
+
+    # ⑦ 导入快照目录必须有「不要读这里」的声明（2026-09-19 新增）
+    #    `tools/reasonix-novel-*.md` 是子技能导入时的**源快照**，零引用、且已实测漂移
+    #    （deai 快照还停在旧版）。它们**不是运行时读物**，但长得像技能文件——
+    #    Agent 用 ls 看到会误以为该读它，于是读到一份没人维护的过期方法论。
+    #    声明文件（tools/README.md）是唯一防止这件事发生的东西，所以要盯住它。
+    _tools = root / 'tools'
+    if _tools.is_dir():
+        _snaps = [f for f in _tools.glob('*.md') if f.name != 'README.md']
+        if _snaps and not (_tools / 'README.md').exists():
+            issues.append(
+                f'tools/ 下有 {len(_snaps)} 个无标注的导入快照（如 {_snaps[0].name}）'
+                f'却缺少 README.md —— Agent 会用 ls 看到它们，误以为是必读的技能文件，'
+                f'读到过期副本。要么补 tools/README.md 声明"不要读"，要么删掉整个 tools/。')
+
+    # ⑤ 核心指南必须在**每一个**「每章清单」里有读点
+    #    清单是"唯一权威的写一章清单"，Agent 按它办事。
+    #    实测 `dialogue-writing.md`（改过「道」的上限）与 `human-rhythm.md`（重写过规则 7）
+    #    曾**不在清单里**——改动有落空风险。这八本承载 AI 味治理规则，必须有读点。
+    #
+    #    ⚠️ 2026-09-19 修（**这里是假闸门**）：
+    #    此前只检查 SKILL.md 的「每章最小必做清单」。但**铁律一强制的是
+    #    flow 文件的「执行清单」**（"进入任何 Phase，先读对应的流程文件，
+    #    并按该文件的『执行清单』逐项执行"）。
+    #    实测：`narrative-craft / human-quota / human-rhythm / humanize-toolkit /
+    #    ai-cliche-blacklist` 五本**只写在 SKILL.md 清单里，phase3 执行清单里没有**
+    #    → 严格按铁律一执行的 Agent 一本都不会读，而**本守卫当时全绿**。
+    #    现改为两份清单都查：任何一份缺读点 = 传导断裂。
+    _CORE_GUIDES = ('narrative-craft.md', 'human-quota.md', 'dialogue-writing.md',
+                    'human-rhythm.md', 'review-agent.md', 'quick-reference-card.md',
+                    # novel-humanize 融合（2026-09-16）：加法层 + 禁用词清单
+                    'humanize-toolkit.md', 'ai-cliche-blacklist.md')
+    _sk = read_text(root / 'SKILL.md')
+
+    # 清单 A：SKILL.md「每章最小必做清单」
+    _m = re.search(r'每章最小必做清单(.*?)(?:\n你不是首席内容官|\Z)', _sk, re.S)
+    _sec = _m.group(1) if _m else ''
+    if not _sec:
+        issues.append('SKILL.md 里找不到「每章最小必做清单」小节（结构被改动？）')
+
+    # 清单 B：phase3-writing.md 的「本阶段执行清单」（铁律一强制的那一份）
+    _p3 = read_text(root / 'references' / 'flows' / 'phase3-writing.md')
+    _m2 = re.search(r'本阶段执行清单(.*?)\n```', _p3, re.S)
+    _sec2 = _m2.group(1) if _m2 else ''
+    if not _sec2:
+        issues.append('phase3-writing.md 里找不到「本阶段执行清单」小节（结构被改动？'
+                      '——它是铁律一强制逐项执行的清单）')
+
+    for _label, _body in (('SKILL.md「每章最小必做清单」', _sec),
+                          ('phase3-writing.md「本阶段执行清单」', _sec2)):
+        if not _body:
+            continue
+        for _g in _CORE_GUIDES:
+            if _g not in _body:
+                issues.append(f'核心指南 `{_g}` 不在{_label}里 —— '
+                              f'清单是 Agent 逐章照做的唯一清单，不在清单里 = 读点靠运气')
+
+    # 清单 C：两份清单的**指南读点必须一致**（只写在一边的读点，另一边执行时会漏）
+    #    两套编号同时存在（SKILL.md 10 个动作 vs phase3 的 0–7），
+    #    所以"某个读点只更新了一边"是必然会发生的漂移。
+    _g_rx = re.compile(r'`?([a-z][a-z0-9\-]+\.md)`?')
+    _set_a = set(_g_rx.findall(_sec))
+    _set_b = set(_g_rx.findall(_sec2))
+    # 只比对 guides/ 下的写作指南（phase3 会额外引用 flows/ 与自身结构说明，不算缺口）
+    _known = {p.name for p in (root / 'references' / 'guides').glob('*.md')}
+    _only_a = sorted((_set_a - _set_b) & _known)
+    if _only_a:
+        issues.append(
+            '两套「每章清单」读点不同步：这些指南只在 SKILL.md 清单里、phase3 执行清单里没有 → '
+            + '、'.join(_only_a) +
+            '（铁律一强制执行的是 phase3 的那份，只写在 SKILL.md 里等于 Agent 不会读）')
+
+    # ④ 规则传导：源指南里有的关键规则，**速查卡里必须有**（子代理只读速查卡）
+    _card = read_text(root / 'references' / 'guides' / 'quick-reference-card.md')
+    for _label, _srcfile, _src_rx, _card_rx in PROPAGATION_RULES:
+        _src = read_text(root / 'references' / 'guides' / _srcfile)
+        if not re.search(_src_rx, _src):
+            continue          # 源指南里已没有这条规则（可能被删/改名）——不算传导失败
+        if not re.search(_card_rx, _card):
+            issues.append(
+                f'规则传导断裂：「{_label}」在 {_srcfile} 里有，但**速查卡里没有** —— '
+                f'子代理只读速查卡，等于这条规则对子代理不存在。'
+                f'（改源指南后必须同步 quick-reference-card.md）')
+
+    # ③ 项目结构规范必须存在（**闸门能不能看见稿子，全靠它**）
+    # 2026-09-15 实测：SKILL 规定了文件名却从未规定**目录与字段名**，
+    # 于是真实项目自建了 `正文/` + `index` 字段 → 闸门一章都没扫到，却报"✓ 通过"。
+    # 这条守卫保证那张"接口契约"不会被谁顺手删掉。
+    _SPEC = read_text(root / 'references' / 'flows' / 'phase2-planning.md')
+    for _kw, _why in (
+        ('项目结构', '项目结构规范小节（脚本按它找文件）'),
+        ('chapters/', '章节正文目录约定'),
+        ('chapterNumber', 'JSON 章号字段名（脚本依赖）'),
+    ):
+        if _kw not in _SPEC:
+            issues.append(f'phase2-planning.md 缺少「{_why}」（关键词 {_kw}）—— '
+                          f'规范没写清，Agent 会自建结构，闸门就会看不见稿子')
+
+    # ② "子代理必读"的口径不许再漂回"全套路径"
+    for _f, _pat in (
+        ('SKILL.md', r'任务包里(已经)?附了每一步需要的文件'),
+        ('references/guide-index.md', r'子代理任务包内必须附本索引中对应动作的必读路径'),
+    ):
+        if re.search(_pat, read_text(root / _f)):
+            issues.append(f'{_f}：子代理必读口径与 subagent-brief 冲突'
+                          f'（应给"内联内容 + 速查卡 + 本批 1–2 本"，不是全套路径）')
 
     # soft 方向：max 的 soft 必须更严（更小），min 的必须更大，否则永不触发
     blk = re.search(r'THRESHOLDS = \{(.*?)\n\}', h, re.S)

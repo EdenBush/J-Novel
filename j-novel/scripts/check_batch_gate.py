@@ -41,32 +41,25 @@ if sys.platform == 'win32':
 _CJK = re.compile(r'[\u4e00-\u9fff]')
 _ENCODINGS = ('utf-8', 'gb18030', 'gbk', 'utf-16', 'big5')
 
+# 共享层（唯一真相源）：read_text / parse_waivers / find_chapter_files
+import os as _os
+sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from _shared import read_text as _shared_read_text, parse_waivers  # noqa: E402
+
 
 def read_text(path: Path) -> str:
-    """稳健读文本。
+    """稳健读文本 —— **委托 `_shared.read_text`**（2026-09-19 收归）。
 
-    ⚠ 编码探测的陷阱（实测踩到）：用"中文占比最高"选编码时，utf-16 会把 UTF-8
-    字节流错位解码，产生的乱码里混入大量 CJK 区字符，占比（0.39）反而高于正确的
-    utf-8（0.057）——于是选错编码，JSON 解析直接崩。
-    修复：**utf-8 能干净解码就用 utf-8**（现代文件绝大多数是 UTF-8），解码失败才探测遗留编码。
+    ⚠ 此前这里是**第四份**独立实现，而且和后三份口径相反：
+    它的遗留编码候选里含 `'utf-16'`，且用"中文占比最高"来选编码 ——
+    正是 `_shared.py` 用 400 个真实文件实测证明**会误判 4% 的文件**的那个启发式
+    （utf-16 能把任意偶数长度字节流解成"高中文占比"的乱码）。
+    `_shared` 的规则是**绝不无 BOM 猜 utf-16**，这里却把它当候选。
+
+    后果：同一个文件在两个脚本里可能被解成不同内容 → 闸门之间互相矛盾。
+    全 SKILL 只允许有一份 read_text。
     """
-    raw = path.read_bytes()
-    try:
-        s = raw.decode('utf-8')
-        if '\ufffd' not in s:
-            return s
-    except Exception:
-        pass
-    best, br = None, -1.0
-    for e in ('gb18030', 'gbk', 'big5', 'utf-16'):
-        try:
-            s = raw.decode(e)
-        except Exception:
-            continue
-        r = len(_CJK.findall(s)) / max(1, len(s))
-        if r > br:
-            best, br = s, r
-    return best if best is not None else raw.decode('utf-8', errors='ignore')
+    return _shared_read_text(path)
 
 
 def read_json(path: Path):
@@ -103,8 +96,44 @@ def main():
         sys.exit(2)
 
     cost_mode = plan.get('costMode', 'standard')
-    by_no = {c.get('chapterNumber'): c for c in chapters}
-    nums = sorted(n for n in by_no if isinstance(n, int))
+
+    # ⚠️ 2026-09-15 修：字段名兼容。
+    # 实测真实项目用 `"index": 1`，而本脚本读 `chapterNumber` → 恒为 None
+    # → `by_no` 为空 → 扫到 0 章 → 却报"✓ 闸门通过，下一章：第 1 章"（对 10 章完成稿！）
+    # **两种写法都合规，脚本必须都认**；认不出时下面的 fail-closed 会拦住。
+    def _no_of(c):
+        for k in ('chapterNumber', 'index', 'no', 'chapter', 'chapterNo'):
+            v = c.get(k)
+            if isinstance(v, int):
+                return v
+            if isinstance(v, str) and v.strip().isdigit():
+                return int(v.strip())
+        return None
+
+    by_no = {}
+    _unnumbered = 0
+    for c in chapters:
+        n = _no_of(c)
+        if n is None:
+            _unnumbered += 1
+            continue
+        by_no[n] = c
+    nums = sorted(by_no)
+
+    # ⚠️ fail-closed：**一章都没认出来 = 不能报通过**。
+    # 假闸门里最危险的一种是"没看到东西却给绿"——它比报错更糟，
+    # 因为它会让主编以为验收过了，甚至照着"下一章"的提示去重写已有章节。
+    if not nums:
+        print('[错误] 从 02-写作计划.json 里**一章都没能解析出章号** —— 拒绝放行。')
+        print(f'        chapters 共 {len(chapters)} 项，无法识别章号的 {_unnumbered} 项。')
+        if chapters:
+            print(f'        实际字段：{sorted(chapters[0].keys())}')
+            print('        需要 `chapterNumber`（规范写法）或 `index`（等价写法）且为整数。')
+        print('        → 修好字段名再跑。**不要因为"脚本没报错"就当验收通过。**')
+        sys.exit(2)
+
+    if _unnumbered:
+        print(f'  [警告] 有 {_unnumbered} 项章节没有可识别的章号，已跳过（未计入验收）')
 
     # ---------------- 1. 完成连续性（治乱序） ----------------
     completed = [n for n in nums if by_no[n].get('status') == 'completed']
@@ -118,15 +147,57 @@ def main():
     out_of_order = [n for n in completed if n > watermark]
 
     # ---------------- 2. 字数 ----------------
-    nopass = [n for n in completed if not by_no[n].get('wordCountPass')]
+    # ⚠️ 2026-09-15 修：`wordCountPass` 缺失时**用 `words` 兜底**。
+    # 实测项目只记 `words`，没有 wordCountPass → 原逻辑 `not None` = True
+    # → 把 10 章全部误报成"字数未过"。不能把"字段没写"判成"不合格"。
+    _minw = plan.get('wordsPerChapter') or 3000
+    nopass = []
+    _nopass_unknown = []
+    for n in completed:
+        c = by_no[n]
+        if 'wordCountPass' in c:
+            if not c.get('wordCountPass'):
+                nopass.append(n)
+        elif isinstance(c.get('words'), int):
+            if c['words'] < _minw:
+                nopass.append(n)
+        else:
+            _nopass_unknown.append(n)
 
     # ---------------- 3. 质检痕迹 ----------------
     qc_path = root / '04-质检档案.md'
     qc_text = read_text(qc_path) if qc_path.exists() else ''
+    # ── 正文文件含工程脚手架？（2026-09-19 新增，来自一次真实盲评）────────
+    # **为什么加**：三位独立盲评评委里有两位**各自**把「本章概要 / 章末型：丁·悬念 /
+    #   伏笔标记（预计第X卷回收）」列为**最强的 AI 指纹**——原话："人类作者投正文
+    #   不会写'章末型：丁'""外挂的元数据头部暴露了流水线出身"。
+    #   `extract_body()` 会剥掉它们，所以**脚本从来没报过**；但任何读到这个文件的人都会看到。
+    # 修法：正文文件只留 `# 标题 + 章首引子 + 正文`；元数据移入 `chapters/_meta/<章名>.meta.md`。
+    _SCAFFOLD = ('本章概要', '章末型', '伏笔标记', '章节备注', '章末落点', '开场类型')
+    scaffold_hits = []
+    for _cf in sorted((root / 'chapters').glob('第*.md')):
+        # 排除备份/草稿（ 这类不属于正式稿，
+        # 但**备份也不该留在 chapters/ 里**——会污染任何扫这一层的工具）
+        if any(k in _cf.name for k in ('.bak', '备份', '.orig', '_backup', '.tmp')):
+            continue
+        _cs = read_text(_cf)
+        _found = [_k for _k in _SCAFFOLD if _k in _cs]
+        if _found:
+            scaffold_hits.append('%s（%s）' % (_cf.name, '、'.join(_found)))
+
     missing_qc = []
     for n in completed:
-        # 容忍 "第3章" / "第 3 章" / "### 第3章" 等写法
-        if not re.search(rf'第\s*{n}\s*章', qc_text):
+        # ⚠️ 2026-09-15 修：**格式宽容**。
+        # 原正则只认「第N章」；实测真实项目用表格 `| 01 | 本局无攻略 | 3327 |`，
+        # 于是 10 章全被判"质检无记录" —— **假阳性阻塞**（会逼主编去改本来没问题的档案）。
+        # 现在同时接受：`第3章`／`第03章`／表格行 `| 3 |`／`### 3.`／`## 03、`
+        pats = (
+            rf'第\s*0*{n}\s*章',
+            rf'(?m)^\|\s*0*{n}\s*\|',
+            rf'(?m)^#{{1,4}}\s*0*{n}\s*[.、·\s]',
+            rf'(?m)^\s*0*{n}\s*[.、·]\s*\S',
+        )
+        if not any(re.search(p, qc_text) for p in pats):
             missing_qc.append(n)
 
     # ---------------- 4. 台账推进 ----------------
@@ -170,16 +241,28 @@ def main():
     # 设计意图：check_continuity 是【提示工具】不是硬闸门——"刻意留后章"是正常写法。
     # 主编复查后若判定正常，在 05-创作台账.md 里写一行显式放行记录即可，不必绕过闸门。
     #   格式：boundary-waived: 第8→9章，理由：该钩子第11章回收（至少 8 字）
-    waived, waiver_note = False, ''
+    #
+    # ⚠️ 2026-09-19 修（**重要，假放行事故**）：
+    #   此前这里用宽松正则 `boundary-waived\s*[:：]\s*(.{8,})` + `waived = True`（**全局**）。
+    #   而 check_continuity.py 用严格正则 `第(\d+)→(\d+)章` **按章号对**扣。
+    #   于是**从文档里抄来的模板行**：
+    #       boundary-waived: 第N→N+1章，理由：该钩子第M章回收，已在03-状态台账登记
+    #   在 check_continuity 里**正确地不豁免**（N/M 不是数字）→ exit 1，
+    #   却被这里匹配上 → 报"✓ 闸门通过 —— [已放行]"。**宽松层覆盖了严格层。**
+    #   实测：真实项目台账里就躺着这一行模板，全书边界检查被它一条豁免。
+    #
+    #   现改为：走 `_shared.parse_waivers`（与 check_continuity 同一口径）
+    #   —— ① 章号必须是具体数字，② 必须相邻，③ 理由 ≥8 字，④ 无效记录要报出来。
+    waived, waiver_note, waiver_problems = False, '', []
     if boundary_fail:
         lt_all = read_text(root / '05-创作台账.md') if (root / '05-创作台账.md').exists() else ''
-        # 支持**多条** waiver（一章台账里可能放行了多个边界）
-        _ws = re.findall(r'boundary-waived\s*[:：]\s*(.{8,})', lt_all)
-        if _ws:
+        _pairs, waiver_problems = parse_waivers(lt_all)
+        if _pairs:
             waived = True
-            waiver_note = ' ｜ '.join(w.strip()[:48] for w in _ws[:3])
-            if len(_ws) > 3:
-                waiver_note += f' ｜ …另有 {len(_ws) - 3} 条'
+            _lst = sorted(_pairs)
+            waiver_note = ' ｜ '.join(f'第{a}→{b}章' for a, b in _lst[:4])
+            if len(_lst) > 4:
+                waiver_note += f' ｜ …另有 {len(_lst) - 4} 条'
 
     # ---------------- 5.6 崩坏红线 1：连续 3 章同章末型 / 同开场类型 ----------------
     # 原设计里这条红线只写在文档里，靠 Agent 自己数——会话一切断就数不了（03/05 台账都不记这个）。
@@ -264,8 +347,16 @@ def main():
         blockers.append(
             '【章节边界有悬空钩子】check_continuity.py 退出码 1 —— 逐条复查：'
             '"该接没接"（补一句桥接）还是"刻意留后章"（在细纲标注回收章）。\n'
-            '      → 复查后若判定是刻意留白，在 05-创作台账.md 写一行放行记录即可：\n'
-            '         boundary-waived: 第N→N+1章，理由：该钩子第M章回收'
+            '      → 复查后若判定是刻意留白，在 05-创作台账.md 写一行放行记录，'
+            '**必须写具体章号**（照抄文档里的 N/M 占位符不算）：\n'
+            '         boundary-waived: 第8→9章，理由：该钩子第11章回收'
+        )
+    if waiver_problems:
+        blockers.append(
+            '【放行记录无效】05-创作台账.md 里有形似 boundary-waived 但**不成立**的记录：\n'
+            + '\n'.join('      · ' + p for p in waiver_problems) +
+            '\n      → 放行必须指名"第X→Y章"（X、Y 是真实数字、且相邻）+ 理由 ≥8 字。\n'
+            '      → 文档里的 `第N→N+1章` 是**示例模板**，抄进台账等于写了一条假放行。'
         )
     if redline_hit:
         blockers.append(
@@ -293,6 +384,12 @@ def main():
     print(f'项目：{root.name}')
     print(f'费用模式：{cost_mode} ｜ 已完成：第 {completed} 章 ｜ 连续水位线：第 {watermark} 章')
     # ⚠️ 提示类信息放在标题**之后**（此前在标题之前，输出像"顶部有两行孤立文字"）
+    if scaffold_hits:
+        print()
+        print('  [脚手架] ⚠ 正文文件里含工程字段 —— 盲评实测这是**最强的 AI 指纹**：')
+        for _h in scaffold_hits[:5]:
+            print('     · %s' % _h)
+        print('     → 移入 chapters/_meta/<章名>.meta.md，正文文件只留 `# 标题 + 章首引子 + 正文`')
     if waived:
         print(f'  [已放行] 章节边界：{waiver_note}')
     if redline_note:
@@ -300,7 +397,20 @@ def main():
     print()
 
     if not blockers:
-        print('✓ 闸门通过 —— 可以派发下一批（下一章：第 %d 章）' % (max(nums) + 1 if nums else 1))
+        # ⚠️ 2026-09-16 修：原实现用 `max(nums)+1`（nums = 本批**计划**的全部章号），
+        # 于是「只完成第 1 章、本批计划 1–10」时会提示"下一章：第 11 章"——照做会**跳过 2–10 章**。
+        # 真实事故：《我不是大师》第 01 章完成、02–10 pending，闸门却建议从第 11 章开始。
+        # 正确语义：下一章 = 连续水位线 + 1；并区分"本批进行中"与"本批已收尾可派下一批"。
+        _last = max(nums) if nums else 0
+        _first = min(nums) if nums else 1
+        if nums and watermark >= _last:
+            print('✓ 闸门通过 —— 本批（第 %d–%d 章）已收尾，可以派发下一批（下一章：第 %d 章）'
+                  % (_first, _last, _last + 1))
+        else:
+            _next = (watermark + 1) if watermark else _first
+            _rest = [n for n in nums if n > watermark] if nums else []
+            print('✓ 闸门通过 —— 本批**进行中**：下一章应写「第 %d 章」（本批第 %d–%d 章，还剩 %d 章未写）'
+                  % (_next, _first, _last, len(_rest)))
         sys.exit(0)
 
     print(f'✗ 闸门未通过（{len(blockers)} 项阻塞）—— 不许派发下一批：\n')

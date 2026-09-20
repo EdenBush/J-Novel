@@ -23,6 +23,8 @@
 | **定章末型 / 定开场方式 / 定情绪载体（写细纲时就要做）** | **`guides/narrative-craft.md`**（人类作者的**决策逻辑**：章末四型+实测配比／日常进入型开场／结构级废笔／称呼即关系刻度／异质材料插入／情绪的外部介质／排版即节奏，**每项附真实人类原文**） | `guides/hook-techniques.md`（四型怎么落笔）· `guides/chapter-craft.md`（开场类型判定） |
 | 规划/写作章首引子（仅新起型）与章尾落点、判定开场类型 | `guides/hook-techniques.md`（**章尾四型**：信息结算 30% / 关系余韵 27% / 喜剧反转 23% / 悬念 13%）+ `guides/chapter-craft.md`（「续接优先」+ 日常进入型） | — |
 | 写对话 | `guides/dialogue-writing.md`（含**三之二·称呼即关系刻度**） | — |
+| **动笔前想"往里加什么"（加法层）** | **`guides/humanize-toolkit.md`**（30 招内容注入：私人细节／情绪体感化／人性灰度／主角必须犯错／句式情绪同步／感官偏见化／信息碎玻璃化／减空洞加颗粒…**每招带改前改后对照**，并附 3 部人类的实测裁决） | 按类型选重点（悬疑/言情/玄幻/都市/通用 五档） |
+| **质检后扫禁用词与模板句式** | **`guides/ai-cliche-blacklist.md`**（分级禁用词／AI 模板句式清洗表／小说专属万能情绪模板／模板道具清单／误伤警告表／**实测驳回表**） | 跑 `scripts/check_aistyle.py`（含新增的**半角引号硬闸门**与万能情绪模板提示） |
 | **从零开始完整流程**（七轮采访 + 圣经 + 正文） | **`reasonix-novel-weaver`** | — |
 | **高效出稿**（质量可接受、追求速度） | **`reasonix-novel-weaver-lite`** | — |
 | **章节质检后（脚本已全绿）** | **`guides/review-agent.md`**（独立质检子代理：同构／删除／作者在场／用力过猛 四项测试） | — |
@@ -47,7 +49,8 @@
 | **NSFW 模式（contentMode: nsfw）** | **`guides/nsfw-mode.md`** + 注入 `references/prompts/infinite-gen-3.md` | — |
 | **每一次 LLM 调用前（成本纪律，铁律九，两种模式都适用）** | **`guides/token-efficiency.md`**（成本 ≈ 调用次数 × 上下文；一次跑完脚本/一次批量改写/不重读/子代理只读速查卡） | 跑 `scripts/audit_tokens.py <项目目录> --chapters N`（看真实 usage 与调用数是否超标） |
 | **想量化"这套流程到底花了多少 token"** | 跑 `scripts/audit_tokens.py`（读日志真实 usage：cacheRead/input/output + 调用数/改写次数/指南读取次数） | 判据见 `guides/token-efficiency.md` 第四节 |
-| **改动本 SKILL 之后 / 发布或冻结版本之前** | 读 `references/skill-mechanics.md` 第五节（维护检查清单 + 判据） | 跑 `python scripts/audit_release.py --regress`（引用完整性/脚本语法/阈值一致性/调用链闭合/结构完整性/残留检查/**跨脚本一致性**/分离回归，**8 项**一次跑完；退出码 0 才算通过）<br>**动了任何检查项后，再跑 `python scripts/test_guards.py`**（8 例故障注入；"加了守卫"≠"守卫有效"） |
+| **改动本 SKILL 之后 / 发布或冻结版本之前** | 读 `references/skill-mechanics.md` 第五节（维护检查清单 + 判据） | 跑 `python scripts/audit_release.py --regress`（引用完整性/脚本语法/阈值一致性/调用链闭合/结构完整性/残留检查/**跨脚本一致性**/分离回归，**8 项**一次跑完；退出码 0 才算通过）<br>**动了任何检查项后，再跑 `python scripts/test_guards.py`**（故障注入；"加了守卫"≠"守卫有效"，用例数以运行时输出的 n/n 为准） |
+| **作者要改设定／改剧情／改结局（写到一半想动大纲）** | **`guides/change-management.md`**（五步变更流程：登记 → 影响评估 → 分层执行 → 留痕 → 验证；含"变更三深度"帮作者选代价） | `guides/volume-review.md`（卷末复盘产出的 P0 修订计划走同一套流程） |
 | 卷终维护圣经 | `guides/bible-template.md`（状态机） | `guides/creation-ledger.md`（台账对账） |
 
 ---
@@ -91,7 +94,7 @@
 
 1. **【必须】指南 = 前置条件**：动作开始前完成阅读，不在动作中途补读
 2. **一个动作对应多个必读**（如质检 = 三本）：全部读完再动手，不可只读其中一本
-3. **子代理同样适用**：子代理任务包内必须附本索引中对应动作的必读路径；任务包不含 → 拒绝开工并向主编要
+3. **子代理按精简口径，不是本索引全量**：子代理任务包给 **① 内联的关键内容（给原文不给路径）② 速查卡 ③ 本批 1–2 本 guide**——**不要附"对应动作的必读路径"清单**，那会把 10 本 guide ≈ 40k 塞进子代理上下文，并跟着它每一次调用重发。完整判据见 `guides/subagent-brief.md`（唯一事实源）。任务包缺上述三样 → 拒绝开工并向主编要
 4. **记忆不可替代阅读**：哪怕你自认熟悉某本指南的内容，动作前仍要快速扫一遍——指南可能有更新，你的记忆可能滞后
 5. **找不到文件**：先定位 SKILL 目录（`~/.workbuddy/skills/j-novel/` 或项目 `.workbuddy/skills/j-novel/`），仍找不到 → 停下询问，不跳过
 
