@@ -40,9 +40,10 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _shared import extract_body as _shared_extract_body, read_text as _shared_read_text  # noqa: E402
 
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+sys.path.insert(0, str(Path(__file__).parent))
+from _shared import ensure_utf8_stdio      # noqa: E402
+
+ensure_utf8_stdio()
 
 _CJK = re.compile(r'[\u4e00-\u9fff]')
 _ENCODINGS = ('utf-8', 'gb18030', 'gbk', 'utf-16', 'big5')

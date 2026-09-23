@@ -1,19 +1,52 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""成本审计：统计 LLM 调用次数、上下文峰值、微步循环占比、重复读文件。
+"""成本审计：统计 LLM 调用次数、**每次调用平均重发多少上下文**、微步循环占比、重复读文件。
+
+## ⚠️ 数据源在 2026-09-23 被修正（此前指向一个不存在的地方）
+
+原版找 `<项目目录>/AGENT工作日志/session.jsonl` —— 实测**全盘搜索该目录从未被任何环节产出**：
+项目里没有，脚本里也没有任何代码写它。也就是说这个"成本审计工具"**自己就是个孤儿**：
+它有校验点，却指向一个不存在的生成点（正是本轮审计的"三站"病灶）。
+
+**真实数据在平台侧**：`~/.workbuddy/traces/<pid>/trace_*.json`，每个文件 = 一个 agent 会话，
+其 `trace.modelInfo` 带**真实 usage**：
+
+```json
+{"callCount": 319, "totalInputTokens": 91202261,
+ "totalCachedTokens": 90888576, "totalOutputTokens": 190659}
+```
+
+★ **本脚本现在默认读这里。** 老路径仍作兜底（万一将来有人真的落盘日志）。
+
+## 能测什么 / 不能测什么（不要过度声称）
+
+**能测**：每个会话的真实 cacheRead / input / output / 调用数；
+派生指标 **每次调用平均重发上下文 = totalCachedTokens / callCount**（成本的主项就在这里）；
+成本集中度（前 K 个会话占多少）。
+
+**不能测**：**单次调用之间上下文是否在增长**。
+（`generation` span 的 `toolInput` 被**截断在 100k 字符**，每次长度都相同；轨迹里没有逐次 usage。）
+所以"某个角色是不是在累积上下文"**无法从轨迹直接证明**——它是一个机制论证，
+本脚本只给量级（"平均每次要重发多少"）。
 
 用法:
-    python audit_tokens.py <项目目录>          # 项目目录下应有 AGENT工作日志/
-    python audit_tokens.py <项目目录> --json   # 输出 JSON
+    python audit_tokens.py <项目目录>                    # 兜底：找 AGENT工作日志/
+    python audit_tokens.py --traces                     # ★ 主路径：读平台轨迹
+    python audit_tokens.py --traces --since 2026-09-01  # 只看这段日期之后
+    python audit_tokens.py --traces --json
 
 判据（见 references/guides/token-efficiency.md）：
     调用数 > 25/章        → 违规（掉进微步循环）
     脚本调用 > 6/章       → 违规
     同一文件改写 > 6 次   → 违规
     同一指南会话内读 ≥2 次 → 违规
+★ 新判据（真实数据驱动）：**每次调用平均重发上下文 > 100k tokens** → 上下文纪律已失守
+    （这个数才是"97% 成本在 cacheRead"的具体形态；它是**每个角色都要看**的指标）
 """
 import argparse
+import glob
 import json
+import os
 import re
 import sys
 from collections import Counter, defaultdict
@@ -27,6 +60,7 @@ SKIP_TYPES = {
 GUIDE_RE = re.compile(r'references[\\/]{1,2}(guides|flows|prompts)[\\/]{1,2}([A-Za-z0-9_\-]+\.md)')
 SCRIPT_RE = re.compile(r'check_[a-z_]+\.py|convert_to_txt\.py|audit_tokens\.py')
 CHAP_RE = re.compile(r'第\s*\d+\s*章')
+DEFAULT_TRACES = Path.home() / '.workbuddy' / 'traces'
 
 
 def est_tokens(s: str) -> int:
@@ -38,7 +72,11 @@ def est_tokens(s: str) -> int:
 
 
 def find_logs(root: Path):
-    """定位 AGENT工作日志 下的全部 session.jsonl。"""
+    """兜底路径：`AGENT工作日志` 下的 session.jsonl。
+
+    ⚠️ 实测**没有任何环节会产出这个目录**（项目里没有、脚本里也没有写它的代码）。
+       保留它只为兼容；真实数据请走 `find_traces()`。
+    """
     for cand in (root / 'AGENT工作日志', root):
         if cand.is_dir():
             main = cand / 'session.jsonl'
@@ -46,6 +84,25 @@ def find_logs(root: Path):
             if main.exists() or subs:
                 return ([main] if main.exists() else []) + subs
     return sorted(root.rglob('session.jsonl'))
+
+
+def find_traces(traces_dir: Path, since: str = ''):
+    """定位平台轨迹文件，返回 [(路径, trace dict)]。"""
+    out = []
+    for f in sorted(glob.glob(str(traces_dir / '*' / 'trace_*.json'))):
+        try:
+            with open(f, encoding='utf-8') as fh:
+                d = json.load(fh).get('trace', {})
+        except Exception:
+            continue
+        started = (d.get('startedAt') or '')[:10]
+        if since and started and started < since:
+            continue
+        if not d.get('modelInfo'):
+            continue
+        d['_file'] = f
+        out.append((Path(f), d))
+    return out
 
 
 def read_lines(path: Path):
@@ -134,18 +191,142 @@ def analyze_session(path: Path):
                 scripts=n_scripts, edits=edits, guides=guide_reads, qc_text=qc_text)
 
 
+def analyze_trace(d: dict) -> dict:
+    """从一个 trace 的 modelInfo 取真实 usage，并算派生指标。"""
+    mi = d.get('modelInfo') or {}
+    calls = int(mi.get('callCount') or 0)
+    cached = int(mi.get('totalCachedTokens') or 0)
+    inp = int(mi.get('totalInputTokens') or 0)
+    out = int(mi.get('totalOutputTokens') or 0)
+    return {
+        'calls': calls, 'cached': cached, 'input': inp, 'output': out,
+        # ★ 关键派生指标：**每次调用平均要重发多少上下文**
+        #   成本的主项就在这里（cacheRead 占比 ~97%），
+        #   而"每个角色每次调用带多重的上下文"正是本 SKILL 全部成本纪律的作用对象。
+        'ctx_per_call': (cached / calls) if calls else 0,
+        'amp': (cached / out) if out else 0,
+        'date': (d.get('startedAt') or '')[:10],
+        'agent': d.get('agentName') or '-',
+    }
+
+
+def report_traces(traces_dir: Path, since: str, as_json: bool) -> int:
+    found = find_traces(traces_dir, since)
+    if not found:
+        print(f'✗ 没找到可用轨迹：{traces_dir}'
+              + (f'（--since {since} 之后）' if since else ''))
+        print('  期望 <traces>/<pid>/trace_*.json，且含 trace.modelInfo。')
+        return 2
+
+    rows = []
+    for p, d in found:
+        r = analyze_trace(d)
+        r['file'] = f'{p.parent.name}/{p.name}'
+        rows.append(r)
+
+    tot = {k: sum(r[k] for r in rows) for k in ('calls', 'cached', 'input', 'output')}
+    # ⚠️ `totalCachedTokens` 是 `totalInputTokens` 的**子集**（prompt 里命中缓存的那部分），
+    #    **不是并列项**。初版把两者当成互斥去算占比 → 得出"cacheRead 49.6% / input 50.3%"，
+    #    与文档里"97.8% 是 cacheRead"对不上，差点被当成"文档数字是错的"。
+    #    实测核对：某轨迹 20,782,208 / 21,285,947 = **97.6%** —— 文档没写错。
+    #    正确口径：prompt 总量 = inputTokens；其中 cached 是重发部分，新增 = input − cached。
+    prompt = tot['input']
+    fresh = max(0, tot['input'] - tot['cached'])
+    grand = prompt + tot['output']
+    ctxs = sorted(r['ctx_per_call'] for r in rows if r['calls'])
+    ctx_sum = sum(r['cached'] for r in rows)
+
+    def _pct(xs, q):
+        if not xs:
+            return 0
+        return xs[min(len(xs) - 1, int(len(xs) * q))]
+
+    if as_json:
+        print(json.dumps({
+            'source': str(traces_dir), 'since': since, 'sessions': len(rows),
+            **tot,
+            'prompt_total': prompt, 'fresh_input': fresh, 'grand_total': grand,
+            'cache_share_of_prompt': round(tot['cached'] / max(1, prompt) * 100, 1),
+            'output_share': round(tot['output'] / max(1, grand) * 100, 2),
+            'amplification': round(prompt / max(1, tot['output']), 1),
+            'ctx_per_call_median': round(_pct(ctxs, 0.5)),
+            'ctx_per_call_p90': round(_pct(ctxs, 0.9)),
+            'no_per_call_usage': True,
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    print('=' * 74)
+    print(f'成本基线（**真实 usage**，来自平台轨迹）')
+    print('=' * 74)
+    print(f'  数据源                        {traces_dir}' + (f'  （--since {since}）' if since else ''))
+    print(f'  agent 会话（轨迹）数          {len(rows)}')
+    print(f'  总 LLM 调用次数               {tot["calls"]:,}')
+    print()
+    print('  【真实 usage】口径：prompt = inputTokens（其中 cached 是命中缓存的**子集**）')
+    print(f'    promptTokens（每轮发出的上下文）{prompt:>15,}  {prompt/max(1,grand)*100:5.1f}%')
+    print(f'      ├ 其中 cacheRead（缓存命中）  {tot["cached"]:>15,}  '
+          f'= prompt 的 {tot["cached"]/max(1,prompt)*100:.1f}%')
+    print(f'      └ 其中新增输入（非缓存）      {fresh:>15,}  '
+          f'= prompt 的 {fresh/max(1,prompt)*100:.1f}%')
+    print(f'    outputTokens（模型产出）       {tot["output"]:>15,}  {tot["output"]/max(1,grand)*100:5.2f}%')
+    print(f'    ★ 放大倍数（prompt/output）    {prompt/max(1,tot["output"]):>15,.0f}x')
+    print()
+    med, p90 = _pct(ctxs, 0.5), _pct(ctxs, 0.9)
+    print('  【★ 每次调用平均重发上下文】—— 成本纪律的作用对象')
+    print(f'    中位数                        {med:>15,.0f} tokens/次')
+    print(f'    p90                           {p90:>15,.0f} tokens/次')
+    if med > 100_000:
+        print(f'    ✗ 判据「< 100k tokens/次」**未通过** —— 上下文纪律已失守：')
+        print(f'      这意味着**每一轮都在重发十几万 token 的上下文**，而写入只有几百 token。')
+    else:
+        print(f'    ✓ 判据「< 100k tokens/次」通过')
+    print()
+    top = sorted(rows, key=lambda r: -r['cached'])[:5]
+    if ctx_sum:
+        print(f'  【成本集中度】前 5 个会话占 cacheRead 的 '
+              f'{sum(r["cached"] for r in top)/ctx_sum*100:.0f}%')
+    print('  【最贵的 5 个会话】')
+    print('     调用    cacheRead     每次上下文   日期        （会话）')
+    for r in top:
+        print(f'    {r["calls"]:>5,}  {r["cached"]:>12,}  {r["ctx_per_call"]:>10,.0f}  '
+              f'{r["date"]}  {r["file"][:18]}')
+    print()
+    print('  ⚠️ 本脚本**测不出**"单次调用之间上下文是否在增长"——')
+    print('     `generation` span 的 toolInput 被截断在 100k 字符、每次等长，')
+    print('     且轨迹里没有逐次 usage。所以"某个角色是否在累积上下文"仍是**机制论证**，')
+    print('     这里只给量级（平均每次要重发多少）。')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description='Agent 工作流成本审计')
-    ap.add_argument('project', help='项目目录（含 AGENT工作日志/）')
+    ap.add_argument('project', nargs='?',
+                    help='项目目录（兜底路径，找 AGENT工作日志/）。'
+                         '★ 主路径用 --traces')
+    ap.add_argument('--traces', nargs='?', const=str(DEFAULT_TRACES), default=None,
+                    help=f'读平台轨迹目录（默认为 {DEFAULT_TRACES}）——**真实 usage 在这里**')
+    ap.add_argument('--since', default='', help='只看该日期（YYYY-MM-DD）之后的轨迹')
     ap.add_argument('--chapters', type=int, default=0, help='章数（用于按章折算）')
     ap.add_argument('--json', action='store_true', help='输出 JSON')
     args = ap.parse_args()
+
+    # ★ 主路径：平台轨迹（真实 usage）。兜底：老的项目内日志目录。
+    if args.traces is not None:
+        return report_traces(Path(args.traces), args.since, args.json)
+
+    if not args.project:
+        ap.error('需要给项目目录，或用 --traces 读平台轨迹')
 
     root = Path(args.project)
     logs = find_logs(root)
     if not logs:
         print(f'✗ 未找到工作日志：{root}')
         print('  期望路径：<项目目录>/AGENT工作日志/session.jsonl')
+        print()
+        print('  ⚠️ 实测**没有任何环节会产出这个目录**（项目里没有、脚本里也没有写它的代码）。')
+        print('     真实 usage 在平台侧 —— 请改用：')
+        print(f'         python scripts/audit_tokens.py --traces')
+        return 2
         return 2
 
     totals = dict(calls=0, content=0, peak=0, billed=0, scripts=0, qc_text=0,

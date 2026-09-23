@@ -14,9 +14,10 @@ import sys
 from pathlib import Path
 
 # 修复 Windows 控制台编码问题
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+sys.path.insert(0, str(Path(__file__).parent))
+from _shared import ensure_utf8_stdio      # noqa: E402
+
+ensure_utf8_stdio()
 
 
 def count_chinese_words(text: str) -> int:

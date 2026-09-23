@@ -40,8 +40,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.path.insert(0, str(Path(__file__).parent))
+from _shared import ensure_utf8_stdio      # noqa: E402
+
+ensure_utf8_stdio()
 
 SKILL = Path(__file__).resolve().parent.parent
 PY = sys.executable
@@ -144,12 +146,19 @@ def main():
 
     results = []
 
-    print('① 守卫⓪：注释掉共享 import（曾用 `in src` 判断 → 被注释骗过）')
+    print('① 守卫⓪：注释掉共享 import（曾经用 `in src` 判断 → 被注释骗过）')
+    print('   ⚠️ 这个用例 2026-09-21 抓到过一个**新形态**：check_aistyle.py 为了找章节')
+    print('      文件加了个 try/except 兜底 `from _shared import find_chapter_files`，')
+    print('      于是旧判据"存在任意 from _shared import"被那行**mask 掉**——')
+    print('      真正的委托 import 注释掉后守卫照样通过。**合法代码让守卫失效，')
+    print('      而守卫看起来还在。** 现在改为按**委托符号**（extract_body/read_text）判。')
     results.append(inject_case('注释 import', 'check_aistyle.py',
                                lambda s: s.replace('from _shared import (', '# from _shared import (', 1),
                                '没有走 _shared'))
 
-    print('② 守卫①：删掉 continuity 的共享 import')
+    print('② 守卫⓪：删掉 continuity 的共享 import')
+    print('   （原「守卫①」已并入⓪——① 与⓪查的是同一件事，且⓪现在按**委托符号**判，'
+          '不再被兜底 import 屏蔽）')
     results.append(inject_case('删 import', 'check_continuity.py',
                                lambda s: s.replace(
                                    'from _shared import extract_body as _shared_extract_body',
@@ -428,6 +437,299 @@ def main():
         return s.replace(m.group(1), m.group(1).replace('humanize-toolkit.md', 'QQQ.md', 1), 1)
     results.append(inject_case('两套清单读点不同步', 'references/flows/phase3-writing.md',
                                _desync_clists, '不同步'))
+
+    print('㉔ **世界设定传导链：从任务包里拿掉「世界设定包」必须报警**')
+    print('   （2026-09-20 真实事故：圣经在整个 SKILL 里只有一处提及、创作期零读点 →')
+    print('     落笔时不是一个庞大的世界，子代理之间不是同一个世界）')
+    results.append(inject_case('任务包无世界设定包', 'references/guides/subagent-brief.md',
+                               lambda s: s.replace('世界设定包', 'QQQ包'), '世界设定传导链断裂'))
+
+    print('㉕ **世界设定传导链：从速查卡拿掉「世界一致性」必须报警**')
+    print('   （子代理只读速查卡 → 卡里没有 = 这条约束对它不存在）')
+    # ⚠️ expect_kw 用「世界设定传导链断裂」而不是「规则传导断裂」：
+    #    这条故障会被**两个守卫**同时抓到（⑧ 传导链守卫 + PROPAGATION_RULES 规则表），
+    #    先报出的是前者。**断言写得比守卫窄，就会把"守卫正常工作"误判成"守卫无效"**
+    #    ——这个坑在 ⑬ 上已经踩过一次（文案里插了清单名，旧关键字匹配不上）。
+    results.append(inject_case('速查卡无世界一致性', 'references/guides/quick-reference-card.md',
+                               lambda s: s.replace('世界一致性', 'QQQ'), '世界设定传导链断裂'))
+
+    print('㉖ **剧情脚手架传导链：从 Phase 1 拿掉脚手架环节必须报警**')
+    print('   （脚手架填的是流程真空区：作者的剧情设想既不是"内核"也不是"细纲"，没有采集入口）')
+    results.append(inject_case('Phase1 无剧情脚手架', 'references/flows/phase1-interview.md',
+                               lambda s: s.replace('剧情脚手架', 'QQQ环节'), '剧情脚手架传导链断裂'))
+
+    print('㉗ **剧情脚手架传导链：从任务包拿掉「作者画面」必须报警**')
+    print('   （作者画面是流水线上最保人味的素材——那是作者自己的眼睛，传不到就白挖了）')
+    results.append(inject_case('任务包无作者画面', 'references/guides/subagent-brief.md',
+                               lambda s: s.replace('作者画面', 'QQQ素材'), '剧情脚手架传导链断裂'))
+
+    print('㉘ **开场不许同质：从速查卡拿掉这条禁令必须报警**')
+    print('   （2026-09-21 真实事故：两条规则叠加被过度执行 →')
+    print('     三到五章开头全变成"时间＋环境空镜"。子代理只读速查卡）')
+    results.append(inject_case('速查卡缺开场同质禁令', 'references/guides/quick-reference-card.md',
+                               lambda s: s.replace('开场不许同质', 'QQQ').replace('别和它同型', 'QQQ'),
+                               '规则传导断裂'))
+
+    print('㉙ **跨章开场同质必须被 check_repetition.py --all 抓到**')
+    print('   （批量写作特有的结构级同构——单章看不出来，连写才暴露）')
+    _tk = Path(tempfile.gettempdir()) / '_guard_openings'
+    try:
+        _shx.rmtree(_tk)
+    except Exception:
+        pass
+    (_tk / 'chapters').mkdir(parents=True, exist_ok=True)
+    for _i, _txt in enumerate([
+        '早上五点，天色还暗，村子静悄悄的。他睁开眼。',
+        '第二天清晨，雾气还没散，路上没有人。他走出去。',
+        '傍晚的时候，风从巷口灌进来。他把门关上。',
+    ], start=1):
+        (_tk / 'chapters' / f'第0{_i}章-测试.md').write_text(
+            f'# 第0{_i}章 测试\n\n' + _txt + '\n', encoding='utf-8')
+    _rok = subprocess.run([PY, '-X', 'utf8', str(SKILL / 'scripts' / 'check_repetition.py'),
+                           '--all', str(_tk)],
+                          cwd=str(SKILL), capture_output=True, text=True, encoding='utf-8', errors='replace')
+    _ook = (_rok.returncode == 1) and ('开场同质' in (_rok.stdout or ''))
+    print(f'  {"✓" if _ook else "✗"} 连续 3 章空镜起手  →  '
+          f'{"抓到（exit 1）" if _ook else "**没抓到！（exit %d）**" % _rok.returncode}')
+    results.append(_ook)
+    try:
+        _shx.rmtree(_tk)
+    except Exception:
+        pass
+
+    print('㉚ **章末不许公式化：从速查卡拿掉这条禁令必须报警**')
+    print('   （2026-09-21 真实事故：五章结尾全是"叙述+余味"，两章连着用「反正…」。')
+    print('     闸门只查大纲的「章末型」字段 → 标签轮换了、手感没换）')
+    results.append(inject_case('速查卡缺章末禁令', 'references/guides/quick-reference-card.md',
+                               lambda s: s.replace('章末不许公式化', 'QQQ').replace('换落笔形态', 'QQQ'),
+                               '规则传导断裂'))
+
+    print('㉛ **相邻两章同收束词必须被 check_repetition.py --all 抓到**')
+    print('   （"反正…"接着"反正…"—— 章末公式化最硬的信号）')
+    _te = Path(tempfile.gettempdir()) / '_guard_endings'
+    try:
+        _shx.rmtree(_te)
+    except Exception:
+        pass
+    (_te / 'chapters').mkdir(parents=True, exist_ok=True)
+    for _i, _txt in enumerate([
+        '他睁开眼，天还没亮。',
+        '反正明天还得去挨打。',
+        '反正他自己知道就够了。',
+    ], start=1):
+        (_te / 'chapters' / f'第0{_i}章-测试.md').write_text(
+            f'# 第0{_i}章 测试\n\n' + _txt + '\n', encoding='utf-8')
+    _rek = subprocess.run([PY, '-X', 'utf8', str(SKILL / 'scripts' / 'check_repetition.py'),
+                           '--all', str(_te)],
+                          cwd=str(SKILL), capture_output=True, text=True, encoding='utf-8', errors='replace')
+    _oek = (_rek.returncode == 1) and ('章末同质' in (_rek.stdout or ''))
+    print(f'  {"✓" if _oek else "✗"} 相邻两章同收束词  →  '
+          f'{"抓到（exit 1）" if _oek else "**没抓到！（exit %d）**" % _rek.returncode}')
+    results.append(_oek)
+    try:
+        _shx.rmtree(_te)
+    except Exception:
+        pass
+
+    print('㉜ **P3 续航：从 Phase 3 拿掉「两个例外」必须报警**')
+    print('   （Phase 3 铁律是"全程禁止确认"——没有例外声明，')
+    print('     脚手架的方向对齐会被那条铁律直接压死）')
+    # ⚠️ 这里必须把**两种写法都替换掉**：「两个例外」和「两条例外」。
+    #    守卫的正则是 `两个例外|两条例外`，只替换一种，另一种仍能匹配 →
+    #    用例报"没抓到"，看起来像守卫无效，其实是**注入没到位**。
+    #    **这个坑已经在 ⑥（_all_docs 两处调用）、⑬（清单里两处）踩过两次，这是第三次。**
+    #    规律：注入前先 grep 一遍目标词的全部出现形式，别凭印象写替换。
+    results.append(inject_case('Phase3 无例外声明', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('两个例外', 'QQQ').replace('两条例外', 'QQQ'),
+                               '剧情脚手架传导链断裂'))
+
+    print('㉝ **P3 续航：从 plot-scaffold 拿掉「意图浓度」必须报警**')
+    print('   （没有浓度判据，介入频次会退回"按章数"——对弱意图作者是负担、对强意图作者是缺位）')
+    results.append(inject_case('脚手架缺意图浓度', 'references/guides/plot-scaffold.md',
+                               lambda s: s.replace('意图浓度', 'QQQ'), '剧情脚手架传导链断裂'))
+
+    print('㉞ **low 模式：从 low-cost-mode 拿掉「人味不降清单」必须报警**')
+    print('   （low 会被读成"可以牺牲人味"——而用户要的是"高效质检+人味"，不是"省钱不保人味"）')
+    results.append(inject_case('low 缺人味不降', 'references/guides/low-cost-mode.md',
+                               lambda s: s.replace('人味不降', 'QQQ'), '低费用模式口径不一致'))
+
+    print('㉟ **low 模式：其它文件里写回旧说法「只跑 3 个脚本」必须报警**')
+    print('   （机械项是脚本、0 reasoning token——砍它等于白扔质量；散落各处必然互相矛盾）')
+    results.append(inject_case('phase3 残留旧 low 口径', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('机械项清单（两种模式都全跑、一个不砍）', '只跑 3 个脚本'),
+                               '低费用模式口径不一致'))
+
+    # ── ㊱–㊴ 低消耗 × 链式流水线的接缝（2026-09-21）──────────────────────
+    # 四条各对应一个**真实机制**，不是为凑数——去掉它，对应的洞就没有任何东西拦着。
+    print('㊱ **主编持正文回流必须报警**（成本洞）')
+    print('   （主编是流水线里活得最久的角色；它读正文 = 子代理隔离省下的钱被它一个人花回去）')
+    results.append(inject_case('主编持正文回流', 'references/guides/parallel-workflow.md',
+                               lambda s: s.replace('| 主编 | 圣经 + **交接卡**（不是正文）',
+                                                   '| 主编 | 圣经 + 全部真实章节'),
+                               '低消耗流水线口径不一致'))
+
+    print('㊲ **低模式去掉「主编零正文」的支点必须报警**')
+    print('   （没有 make_handoff 裁卡，主编只能回头读正文——成本洞重新出现）')
+    results.append(inject_case('low 缺交接卡支点', 'references/guides/low-cost-mode.md',
+                               lambda s: s.replace('make_handoff', 'QQQ'),
+                               '低消耗流水线口径不一致'))
+
+    print('㊳ **文档里的命令参数在脚本里不存在，必须报警**')
+    print('   （"文档写了命令"≠"命令有效"——上一轮结构审计 4 个 P0 里有 2 个属于这类）')
+    results.append(inject_case('文档命令参数不存在', 'references/guides/low-cost-mode.md',
+                               lambda s: s.replace('--drift', '--drfit', 1),
+                               '低消耗流水线口径不一致'))
+
+    print('㊴ **链式流水线去掉「边界冻结」必须报警**（质量洞）')
+    print('   （磨手改结尾 → 下一章承接的结尾被掉包；两个都"对"，当场没有脚本会报）')
+    results.append(inject_case('流水线缺边界冻结', 'references/guides/chained-pipeline.md',
+                               lambda s: s.replace('边界冻结', 'QQQ'),
+                               '低消耗流水线口径不一致'))
+
+    print('㊵ **SKILL.md 里残留旧 low 口径必须报警**')
+    print('   ⚠️ 2026-09-21 实测发现的**真漏洞**：守卫原名单只查 phase3 / phase4，')
+    print('      漏了 SKILL.md——而它是**主入口**，写错的口径会被当权威读。')
+    print('      当时 SKILL.md 的「模式开关」一节确实还在写"只跑 3 个脚本…默认串行"。')
+    results.append(inject_case('SKILL.md 残留旧 low 口径', 'SKILL.md',
+                               lambda s: s.replace('机械质检**全跑脚本**（0 token，一个不砍）',
+                                                   '质检降级为只跑 3 个脚本'),
+                               '低费用模式口径不一致'))
+
+    print('㊶ **拿掉漂移自测入口必须报警**')
+    print('   （判据的坑改完必须能随时复验——不必等真实项目在手边）')
+    print('   ⚠️ 初版漏抓：`--selftest` 在文件里出现**两次**（add_argument + 报错提示文案），')
+    print('      只替换一处 → 旧判据"字符串还在"照样通过。故判据改为查**声明**。')
+    print('      （同一概念多处出现，这是本项目第 6 次踩。）')
+    results.append(inject_case('去掉漂移自测', 'check_aistyle.py',
+                               lambda s: s.replace("'--selftest'", "'--selftst'"),
+                               '低消耗流水线口径不一致'))
+
+    # ── ㊷–㊼ 「三站齐备」守卫（2026-09-23）────────────────────────────
+    # 这一组守的是本轮审计的核心结论：**一条机制缺任何一站就等于不存在**
+    #   （缺生成点=没东西可填；缺交付点=执行者看不到；缺校验点=不可证伪）。
+    # 每条都对应一个**实测过的孤儿或矛盾**，不是为凑数。
+    _STATIONS = '一致性机制的「三站」不齐'
+
+    print('㊷ **删掉细纲里的契约栏位必须报警**（生成点）')
+    print('   （"读点 12 处、产出 0 处"——主逻辑机制不能只靠读点齐全）')
+    print('   ⚠️ 初版漏抓：守卫关键词写的是"接口契约"，而改个标题它照样在——')
+    print('      判据改成查**键名**（`进入·位置时间`）才真正验到"栏位存在"。')
+    results.append(inject_case('契约无生成点', 'references/flows/phase2-planning.md',
+                               lambda s: s.replace('进入·位置时间', 'QQQ'),
+                               _STATIONS))
+
+    print('㊸ **删掉 Phase 3 的契约校验必须报警**（交付点）')
+    results.append(inject_case('契约无交付点', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('check_contract.py', 'QQQ.py'),
+                               _STATIONS))
+
+    print('㊹ **删掉三层锚的累计基线必须报警**（交付点）')
+    print('   （只给批锚时**累积漂移在定义上不可见**——每批都合格，全书可以漂到任意远）')
+    results.append(inject_case('三层锚缺累计基线', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('--book-base', '--QQQ'),
+                               _STATIONS))
+
+    print('㊺ **删掉意象配额开关必须报警**（校验点）')
+    print('   （它是唯一的真孤儿：规则写了、零读点——本轮才把它变成脚本）')
+    results.append(inject_case('意象配额孤儿化', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('--imagery', '--QQQ'),
+                               _STATIONS))
+
+    print('㊻ **从执行清单里删掉锚点滚动必须报警**（交付点）')
+    print('   （主力文风机制此前正因"不在任何执行清单里"而等于不存在）')
+    results.append(inject_case('锚点滚动孤儿化', 'SKILL.md',
+                               lambda s: s.replace('锚点滚动', 'QQQ'),
+                               _STATIONS))
+
+    print('㊼ **删掉伏笔表的单载体声明必须报警**（生成点）')
+    print('   （双载体同名必然漂移，而漂移表现恰好是"同一伏笔两处状态不同"）')
+    results.append(inject_case('伏笔双载体', 'references/guides/outline-template.md',
+                               lambda s: s.replace('唯一权威载体', 'QQQ'),
+                               _STATIONS))
+
+    print('㊽ **Phase 2 的模式选择提示写回旧 low 口径必须报警**')
+    print('   ⚠️ 这是**最坏的位置**：它在作者做选择的那一刻说"低费用模式…质量略降"，')
+    print('      作者会带着这个预期去选。（守卫名单此前漏了 phase2，本轮补上）')
+    results.append(inject_case('phase2 选项写旧口径', 'references/flows/phase2-planning.md',
+                               lambda s: s.replace('**批量推进档**', '低费用模式')
+                                          .replace('组织形式走**链式流水线 + 批次**。',
+                                                   '组织形式默认串行，质量略降。'),
+                               '低费用模式口径不一致'))
+
+    print('㊾ **成本审计失去真实数据源必须报警**')
+    print('   ⚠️ 它原来找 `<项目>/AGENT工作日志/session.jsonl`——**该目录从未被任何环节产出**，')
+    print('      于是这个"成本审计工具"自己就是个孤儿：有校验点，却指向不存在的生成点。')
+    print('      真实 usage 在 `~/.workbuddy/traces/`。')
+    results.append(inject_case('审计失去数据源', 'audit_tokens.py',
+                               lambda s: s.replace("'--traces'", "'--Qtraces'"),
+                               '低消耗流水线口径不一致'))
+
+    print('㊿ **成本判据退回"只给比例"必须报警**')
+    print('   （"cacheRead 占 98.7%"是比例，它不告诉你绝对量；真正该盯的是')
+    print('     **每次调用平均重发多少上下文**——实测中位 149,675 tokens/次）')
+    results.append(inject_case('判据只剩比例', 'references/guides/token-efficiency.md',
+                               lambda s: s.replace('每次调用平均重发上下文', 'QQQ'),
+                               _STATIONS))
+
+    print('51. **拿掉任务包的"拒绝开工"校验必须报警**')
+    print('   （任务包编译器是压"每次调用上下文"的唯一机械手段：')
+    print('     槽位有预算，缺槽位/超预算就退出 1 —— 把"记得填"变成"编译不过"）')
+    results.append(inject_case('任务包失去校验', 'make_task_package.py',
+                               lambda s: s.replace("'--check'", "'--Qcheck'"),
+                               '低消耗流水线口径不一致'))
+
+    print('52. **脚本改回「非幂等 stdio 包装」必须报警**')
+    print('   ⚠️ 这类写法会让**脚本互相 import 直接崩**（旧 wrapper 被 GC 时')
+    print('      把共用的底层 buffer 一起关掉 → ValueError: I/O operation on closed file）。')
+    print('      实测触发：make_task_package 要复用 check_contract / make_handoff 的解析逻辑。')
+    print('   ⚠️ 注入用的"坏代码"必须**拼接构造**，不能字面写——')
+    print('      守卫会扫 test_guards.py 自己，字面写进去等于让它命中本文件的 fixture。')
+    _BAD_WRAP = ('sys.stdout = io.TextIOWrapper(sys.stdout'
+                 + '.buffer, encoding=\'utf-8\')')
+    results.append(inject_case(
+        '非幂等 stdio 包装', 'check_contract.py',
+        lambda s: s.replace('ensure_utf8_stdio()', _BAD_WRAP),
+        '非幂等'))
+
+    print('53. **工单失去 Phase 3 接入必须报警**')
+    print('   （「一次合格率」此前没有数据源：retryCount 从未落盘、成本与质量不在一处。')
+    print('     工单是唯一让"改规则前后能对比"的东西——它断链就等于又回到凭感觉改。）')
+    results.append(inject_case('工单断链', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('make_workorder.py', 'QQQ.py'),
+                               _STATIONS))
+
+    print('54. **retryCount 不再落盘必须报警**')
+    print('   （它此前只存在于铁律七的规则描述里、从未被记录过任何一次实际值——')
+    print('     于是"返工率"在**定义上**不可统计。）')
+    results.append(inject_case('返工不落盘', 'references/guides/creation-ledger.md',
+                               lambda s: s.replace('本章返工轮次', 'QQQ'),
+                               _STATIONS))
+
+    print('55. **指标分层被删必须报警**（CTQ = 给耦合指标一个可解的目标）')
+    print('   （17 指标同时硬门 → 改 A 坏 B → 实测某章节律被查 189 次、脚本调用 486 次）')
+    results.append(inject_case('指标不分层', 'references/execution-contract.md',
+                               lambda s: s.replace('修法①：指标分层', 'QQQ'),
+                               _STATIONS))
+
+    print('53. **工单失去 Phase 3 接入必须报警**')
+    print('   （「一次合格率」此前没有数据源：retryCount 从未落盘、成本与质量不在一处。')
+    print('     工单是唯一让"改规则前后能对比"的东西——它断链就等于又回到凭感觉改。）')
+    results.append(inject_case('工单断链', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('make_workorder.py', 'QQQ.py'),
+                               _STATIONS))
+
+    print('54. **retryCount 不再落盘必须报警**')
+    print('   （它此前只存在于铁律七的规则描述里、从未被记录过任何一次实际值——')
+    print('     于是"返工率"在**定义上**不可统计。）')
+    results.append(inject_case('返工不落盘', 'references/guides/creation-ledger.md',
+                               lambda s: s.replace('本章返工轮次', 'QQQ'),
+                               _STATIONS))
+
+    print('55. **指标分层被删必须报警**（CTQ = 给耦合指标一个可解的目标）')
+    print('   （17 指标同时硬门 → 改 A 坏 B → 实测某章节律被查 189 次、脚本调用 486 次）')
+    results.append(inject_case('指标不分层', 'references/execution-contract.md',
+                               lambda s: s.replace('修法①：指标分层', 'QQQ'),
+                               _STATIONS))
 
     for _d in (_p18, _p19, _p21):
         try:

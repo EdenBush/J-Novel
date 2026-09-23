@@ -30,10 +30,41 @@
 > ⚠️ 改动本文件会改变所有密度指标的分母。改完必须重跑
 > `python scripts/audit_release.py --regress`，确认「人类 3/3 exit=0、AI 3/3 exit=1」不退化。
 """
+import io
 import re
+import sys
 
 _CJK = re.compile(r'[\u4e00-\u9fff]')
 _LEGACY_ENCODINGS = ('gb18030', 'gbk', 'big5')
+
+
+def ensure_utf8_stdio():
+    """把 stdout/stderr 包成 UTF-8（Windows 控制台默认 GBK，中文会乱码）。
+
+    ⚠️ **必须幂等**，这是踩出来的：此前 12 个脚本各自在**模块级**写
+        `sys.stdout = io.TextIOWrapper(sys.stdout.buffer, ...)`
+    于是**任何一个脚本 import 另一个脚本，就会崩**：
+
+        ValueError: I/O operation on closed file   (lost sys.stderr)
+
+    原因：`sys.stdout` 已经是一个 TextIOWrapper 时，`sys.stdout.buffer` 是它**共用的**
+    底层 buffer；再包一层，旧 wrapper 被 GC 回收时**把底层 buffer 一起关掉**。
+
+    实测触发：`make_task_package.py` 需要复用 `check_contract` 与 `make_handoff`
+    的解析逻辑，一 import 就崩 —— 也就是说**这 12 个脚本此前是"不可被复用"的**。
+
+    **规律：模块级的全局副作用必须幂等**（否则"被 import"这个动作就会改变程序状态）。
+    """
+    for name in ('stdout', 'stderr'):
+        s = getattr(sys, name, None)
+        if s is None or getattr(s, '_jnovel_utf8', False):
+            continue
+        try:
+            w = io.TextIOWrapper(s.buffer, encoding='utf-8', errors='replace')
+        except Exception:
+            continue
+        w._jnovel_utf8 = True
+        setattr(sys, name, w)
 
 
 def read_text(path) -> str:
@@ -97,8 +128,17 @@ _PANEL = [
 ]
 
 
-def extract_body(text: str) -> str:
-    """从章节文件里取出「正文」——三个脚本必须都走这里。"""
+def extract_body(text: str, keep_blank: bool = False) -> str:
+    """从章节文件里取出「正文」——三个脚本必须都走这里。
+
+    `keep_blank=True` 保留段落之间的空行（**只有需要切段的调用方才用**）。
+    ⚠️ 默认 False 会压掉全部空行 → 正文变成**一行**。
+       于是 `re.split(r'\\n\\s*\\n', body)` 永远得到 1 段，
+       `check_aistyle` 的指标 1「段落长度变异系数 CV」**恒为 0**——
+       而 0 在它自己的判据里是"段长均匀(AI)"，等于**每一章都被报成最差值**。
+       实测：某章真实 80 段，压缩后 1 段。这个死指标挂了很久没人发现，
+       因为它的输出"看起来像正常的数字"。
+    """
     out = []
     skip_meta = False
     for raw in text.split('\n'):
@@ -123,6 +163,8 @@ def extract_body(text: str) -> str:
         if any(p.match(line) for p in _PANEL):
             continue
         if not line:
+            if keep_blank:
+                out.append('')
             continue
         out.append(line)
     return '\n'.join(out)

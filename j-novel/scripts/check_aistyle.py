@@ -14,18 +14,45 @@ AI 统计指纹检测（软指纹，分布层面）
 用法:
   python check_aistyle.py <章节文件.md>          # 单章统计
   python check_aistyle.py --all <项目目录>       # 全书统计（含各章对话比例一致性）
+  python check_aistyle.py --all <项目目录> --drift --brief --window 3 --base 9
+                                                 # 跨章「声音漂移」（流水线窗闸每章跑）
+退出码: 0 = 合格, 1 = 硬性句式超标 / 声音漂移达失败级
 """
 
 import argparse
+import contextlib
 import io
 import re
 import statistics
 import sys
 from pathlib import Path
 
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+sys.path.insert(0, str(Path(__file__).parent))
+from _shared import ensure_utf8_stdio      # noqa: E402
+
+ensure_utf8_stdio()
+
+# 章节发现收归 `_shared.find_chapter_files()`。
+# ⚠ 本脚本 `--all` 曾经是 `project.glob('第*.md')`——**只在项目根找**，
+#   对规范布局（正文放 `chapters/`）的合规项目一个文件都找不到，
+#   直接打印"未找到章节文件"退出 1。这是同一 bug 家族的第 4 次复发
+#   （前三次：check_chapter_wordcount 的假绿、check_repetition 的 --all、
+#     check_continuity 的内联兜底）。
+#   触发场景正是低消耗模式的"一条命令跑完全部脚本"——各脚本互相看不见同一批稿子。
+try:
+    from _shared import find_chapter_files as _find_chapters
+except Exception:  # _shared 不可用时退化为同等口径的目录探测
+    def _find_chapters(root):
+        root = Path(root)
+        for d in ('chapters', '正文', '章节目录'):
+            sub = root / d
+            if sub.is_dir():
+                hit = sorted(p for p in sub.glob('第*.md')
+                             if not p.name.endswith(('.meta.md', '.原稿备份.md',
+                                                     '.bak.md', '.旧.md', '.orig.md')))
+                if hit:
+                    return hit
+        return sorted(root.glob('第*.md'))
 
 # 词典
 TRANSITION_WORDS = ['然而', '但是', '可是', '却', '竟', '反倒', '反而', '不过', '然而事实上']
@@ -216,9 +243,9 @@ from _shared import (extract_body as _shared_extract_body,
                      SIMILE_WORDS, count_similes)  # noqa: E402,F401
 
 
-def extract_body(text):
+def extract_body(text, keep_blank: bool = False):
     """委托给共享实现（保号，供本脚本内部调用）。"""
-    return _shared_extract_body(text)
+    return _shared_extract_body(text, keep_blank=keep_blank)
 
 
 def count_word(text: str, word: str) -> int:
@@ -245,7 +272,12 @@ def analyze_chapter(file_path: Path) -> dict:
         return None
 
     # 1. 段落长度分布
-    paras = [p.strip() for p in re.split(r'\n\s*\n', body) if p.strip()]
+    # ⚠ 必须 keep_blank=True：默认的 extract_body 压掉空行 → 正文只剩 1 段 →
+    #   CV 恒为 0，而 0 在本脚本判据里是"段长均匀(AI)"=**每章都报最差**。
+    #   实测某章真实 80 段被压成 1 段。段长交替是人类最显著的节奏特征之一，
+    #   这个指标挂掉等于把"人味"检测的第一项白送。
+    paras = [p.strip() for p in
+             re.split(r'\n\s*\n', extract_body(text, keep_blank=True)) if p.strip()]
     para_lens = [len(re.sub(r'\s', '', p)) for p in paras]
     cv_para = (statistics.stdev(para_lens) / statistics.mean(para_lens)) if len(para_lens) > 3 and statistics.mean(para_lens) > 0 else 0
 
@@ -474,33 +506,355 @@ def print_chapter(r: dict, full: bool = False):
     return bad_hard_style or bad_quote or bad_cjspace
 
 
+# ══════════════════════════════════════════════════════════════════
+# 跨章「声音漂移」检测（2026-09-21 新增；低消耗并行流水线的窗闸用）
+# ══════════════════════════════════════════════════════════════════
+# 为什么需要：并行流水线里"声音漂了"以前只能靠 LLM 读全章比风格——
+# 那是判断层的价格（贵），而且通常拖到批末才做，那时已经漂了 8 章。
+# 而这些指纹本脚本**已经算出来了**，跨章比一下是 0 token 的事。
+#
+# 两种漂移必须分开抓（只做一种会漏掉一半）：
+#   · **突变**：本章 vs 前 N 章中位数 → 抓"某一章突然换了腔调"
+#   · **渐变**：本章 vs 批首章（固定基线）→ 抓"每章偏一点，六章后已面目全非"
+#     渐变对滚动基线**天然免疫**（每步只偏 15%，永远够不到阈值），只能靠固定基线。
+#
+# 判据分两级（与 check_repetition 同构——闸门太吵就没人看了）：
+#   ✗ 失败（exit 1）：偏离 ≥ 3.0 倍 → 明显不是同一个人的手笔
+#   ⚠ 提示（不影响退出码）：偏离 ≥ 1.5 倍 → 人工看一眼
+# 基线低于该指标的 floor 时不做比较：小分母会把噪声放大成"漂移"。
+
+_DRIFT_METRICS = (
+    ('para_cv',         '段落节律CV', 0.30),
+    ('dialog_ratio',    '对话占比',   0.05),
+    ('trans_density',   '转折词',     0.80),
+    ('emotion_density', '直接情绪词', 0.80),
+    ('simile_density',  '明喻',       0.80),
+    ('cliche_density',  '万能模板',   0.08),
+)
+_DRIFT_HARD = 2.0
+_DRIFT_WARN = 1.0
+
+# 有「健康下限」的指标：基线上正常、本章跌破下限 = 直接可疑。
+# 为什么倍数判据看不见它：段落节律 CV 的有效范围约 0–1.5，
+# 从 0.76 掉到 0.17 只是"降了 78%"，够不到 2× 阈值；但它的**性质**是
+# "从长短交替变成段段均匀"——这正是 AI 化最典型的那一种指纹。
+_DRIFT_HEALTHY_FLOOR = {
+    'para_cv': 0.60,
+}
+
+
+def _chap_no(name: str) -> int:
+    m = re.search(r'第\s*(\d{1,4})\s*章', name)
+    return int(m.group(1)) if m else 10 ** 6
+
+
+def _fmt_metric(key, v):
+    if key == 'para_cv':
+        return f'{v:>10.2f}'
+    if key == 'dialog_ratio':
+        return f'{v*100:>9.0f}%'
+    if key in ('cliche_density',):
+        return f'{v:>10.3f}'
+    return f'{v:>10.1f}'
+
+
+def check_drift(results, window=3, bases=None, verbose=True) -> int:
+    """跨章声音漂移。返回**失败**级问题数（提示级不影响退出码）。
+
+    `bases` = [(标签, 章号), ...]：**第一项是门控锚（批锚）**——只有它之后的章被判定；
+    其余项是**累计参照锚**（卷锚 / 全书锚）。
+
+    **为什么必须有"累计参照锚"**（2026-09-23 新增，补一个由构造产生的盲区）：
+        只拿批内基线比时，**累积漂移在定义上不可见**——
+        批 1 比第 1 章、批 2 比第 11 章、批 10 比第 91 章：**每批都合格，全书可以漂到任意远**。
+        而"读着不像开头那本书了"恰恰**不是批内问题**，所以每一道批级闸门都放它过去。
+        修法不是"取消批锚"（那会把声音的自然演化误报成漂移），而是**两层都报**：
+        批锚抓批内渐变、卷锚抓卷内累计、全书锚抓整本书的累积。
+    """
+    if len(results) < 3:
+        return 0
+
+    # 解析锚 → [(标签, 索引)]
+    # ⚠️ 按**索引**去重，但**把标签合并**（如 `卷锚/全书锚`）——
+    #    一卷的第 1 章常常同时也是全书第 1 章；若直接丢掉重复项，
+    #    报告里就会莫名其妙地少一层锚，读的人会以为那层没生效。
+    if not bases:
+        bases = [('基线', None)]
+
+    def _idx(no):
+        if no is None:
+            return 0
+        return next((i for i, r in enumerate(results) if _chap_no(r['file']) == no), 0)
+
+    gate_idx = _idx(bases[0][1])
+    _merged = {}
+    for lbl, no in bases:
+        _merged.setdefault(_idx(no), []).append(lbl)
+    resolved = [('/'.join(_merged[i]), i)
+                for i in [gate_idx] + [j for j in _merged if j != gate_idx]]
+
+    print('\n' + '=' * 60)
+    print('跨章「声音漂移」检测（0 token 的风格一致性代理指标）')
+    print('=' * 60)
+    _desc = '、'.join(f'{lbl}={results[j]["file"][:16]}' for lbl, j in resolved)
+    print(f'  滚动基线 = 前 {window} 章中位数（抓突变）｜锚：{_desc}')
+
+    if verbose:
+        anchor_idx = {j for _, j in resolved}
+        print('\n  ' + '章'.ljust(5) + ''.join(f'{lbl:>10}' for _, lbl, _ in _DRIFT_METRICS))
+        for i, r in enumerate(results):
+            star = '★' if i in anchor_idx else ' '
+            n = _chap_no(r['file'])
+            label = f'{n:02d}' if n < 10 ** 6 else r['file'][:4]
+            print(f'  {star}{label:<4}'
+                  + ''.join(_fmt_metric(k, r.get(k, 0)) for k, _, _ in _DRIFT_METRICS))
+        print('   （★ = 锚所在章）')
+
+    def _dev(cur, b, floor):
+        # ⚠ floor 作**最小分母**，而不是"低于它就跳过"。
+        #   跳过式写法会静默吞掉最强的一类信号：
+        #   "基线 0.0、本章 51.3"（某类词从无到有地爆发）。作分母后同一个例子得到 64×。
+        return abs(cur - b) / max(b, floor)
+
+    hard, warns = [], []
+    for i, r in enumerate(results):
+        # ⚠️ 只判**门控锚之后**的章（`<=`，不是 `==`）。锚是**参照物**，不是被检对象。
+        #    （初版写 `i == base_idx`，给了 `--base 3` 后还去判第 1、2 章，
+        #      它们的"前 3 章中位数"是空集 → 报出 4.3× 这种纯噪声。实测抓到过。）
+        if i <= gate_idx:
+            continue
+        prev = results[max(0, i - window):i]
+        for key, label, floor in _DRIFT_METRICS:
+            cur = r.get(key, 0)
+            roll = statistics.median([p.get(key, 0) for p in prev]) if prev else None
+            roll_dev = _dev(cur, roll, floor) if (roll is not None and (roll or cur)) else None
+
+            cum_label, cum_val, cum_dev, cum_idx = '', 0, None, None
+            for lbl, j in resolved:
+                if j >= i:                      # 只取**它之前**的锚
+                    continue
+                bv = results[j].get(key, 0)
+                if not (bv or cur):
+                    continue
+                d = _dev(cur, bv, floor)
+                if cum_dev is None or d > cum_dev:
+                    cum_label, cum_val, cum_dev, cum_idx = lbl, bv, d, j
+
+            cand = [x for x in (roll_dev, cum_dev) if x is not None]
+            if not cand:
+                continue
+            worst = max(cand)
+            healthy = _DRIFT_HEALTHY_FLOOR.get(key)
+            refs = [x for x in (roll, cum_val) if x is not None]
+            dropped = healthy is not None and refs and cur < healthy <= max(refs)
+            item = (r['file'], label, cur, roll, roll_dev,
+                    cum_val, cum_dev, cum_label, dropped, cum_idx)
+            if worst >= _DRIFT_HARD:
+                hard.append(item)
+            elif worst >= _DRIFT_WARN or dropped:
+                warns.append(item)
+
+    def _line(t):
+        (name, label, cur, roll, roll_dev,
+         cum_val, cum_dev, cum_label, dropped, _ci) = t
+        bits = [f'本章 {cur:g}']
+        if roll_dev is not None:
+            bits.append(f'前{window}章中位数 {roll:g}（{roll_dev:.1f}×）')
+        if cum_dev is not None:
+            bits.append(f'**{cum_label}** {cum_val:g}（{cum_dev:.1f}×）')
+        if dropped:
+            bits.append('⚠ 跌破健康下限，段落变均匀')
+        return f'  {name[:14]:<16} {label:<8} ' + '，'.join(bits)
+
+    def _is_cum(t):
+        """是不是**真正的累积漂移**——只有"比门控锚更早的容器锚"才报得出来的那种。
+
+        ⚠️ 不能只看"cum_dev > roll_dev"：门控锚（批锚）本身也可能比滚动中位数更灵敏，
+        那属于**批内**波动，不是跨批累积。判据必须是
+        「胜出的锚索引 < 门控锚索引」——即它来自更外层的容器（卷/全书）。
+        """
+        _, _, _, _, roll_dev, _, cum_dev, _, _, cum_idx = t
+        return (cum_dev is not None and cum_idx is not None
+                and cum_idx < gate_idx and cum_dev > (roll_dev or 0))
+
+    n_cum = sum(1 for t in hard + warns if _is_cum(t))
+    if hard:
+        print(f'\n  ✗ {len(hard)} 项声音漂移（≥{_DRIFT_HARD:g}×）——'
+              f'与锚明显不是同一个人的手笔')
+        for t in hard:
+            print(_line(t))
+        if n_cum:
+            print(f'     → 其中 {n_cum} 项是**累积漂移**（只有卷锚/全书锚报得出来）：'
+                  f'这些正是"读着不像开头那本书了"，而批内检测看不见它。')
+        print('     → 处理：把漂移方向写进后续章任务包，并在窗口内把声音拉回来（不要拖到批末）。')
+    if warns:
+        print(f'\n  ⚠ {len(warns)} 项疑似漂移（≥{_DRIFT_WARN:g}×）——人工看一眼，不判死刑')
+        for t in warns:
+            print(_line(t))
+    if not hard and not warns:
+        print('\n  ✓ 未检出声音漂移（含累计参照）')
+    return len(hard)
+
+
+def _selftest() -> int:
+    """漂移检测自测（纯内存，不碰磁盘）——锁住三个**已经踩过**的坑。
+
+    为什么要有它：漂移判定是纯逻辑，但它的三个坑都只在"真实项目跑一遍"时才暴露，
+    而真实项目不是每次都在手边。把合成指纹喂进同一个函数，这些坑就能随时复验。
+    """
+    fails = []
+
+    def R(name, **vals):
+        d = {'file': name, 'para_cv': 0.90, 'dialog_ratio': 0.10,
+             'trans_density': 1.5, 'emotion_density': 0.4,
+             'simile_density': 1.2, 'cliche_density': 0.0}
+        d.update(vals)
+        return d
+
+    def run(results, **kw):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            n = check_drift(results, **kw)
+        return n, buf.getvalue()
+
+    normal = [R(f'第{i:02d}章-甲.md') for i in range(1, 5)]
+
+    # ① 突变要被抓到（转折词 1.5 → 9.0）
+    n, _ = run(normal[:3] + [R('第04章-乙.md', trans_density=9.0)], window=3)
+    if n == 0:
+        fails.append('突变未抓到：转折词 1.5→9.0（6×）应判失败')
+
+    # ② 锚**之前**的章不许被判（`--base` 换锚后误判过 2 项假漂移）
+    n, out = run([R('第01章-丙.md'), R('第02章-丁.md'), R('第03章-戊.md')],
+                 window=3, bases=[('批锚', 3)])
+    if n != 0 or '第01章' in out:
+        fails.append('锚之前的章被误判（`--base 3` 时第 1、2 章不该出现在判定里）')
+
+    # ③ 基线为 0 时"从无到有地爆发"必须被抓（floor 作分母，不作跳过条件）
+    zero = [R(f'第{i:02d}章-己.md', emotion_density=0.0) for i in range(1, 4)]
+    n, _ = run(zero + [R('第04章-庚.md', emotion_density=46.3)], window=3)
+    if n == 0:
+        fails.append('基线 0 → 爆发未抓到：情绪词 0→46.3 应判失败')
+
+    # ④ 正常样本不许误报
+    n, _ = run(normal, window=3)
+    if n:
+        fails.append('正常样本被误报为漂移')
+
+    # ⑤ **累积漂移**必须被抓——这是本函数存在的核心理由：
+    #    每章相对"前 3 章"只偏一点点（永远够不到阈值），但相对**全书锚**已面目全非。
+    #    关键在数据设计：**门控锚必须晚于全书锚**（批锚 = 第 7 章），
+    #    否则批锚恰好就是全书锚，"只比批锚"也会抓到，这一项就证明了不了任何事。
+    creep = [R(f'第{i:02d}章-辛.md', para_cv=0.90 + 0.25 * (i - 1)) for i in range(1, 13)]
+    n_roll_only, _ = run(creep, window=3, bases=[('批锚', 7)])
+    if n_roll_only != 0:
+        fails.append('自测前提错误：这批数据本该"只看批锚抓不到"——'
+                     '若抓到了，说明第 5 项证明不了盲区的存在')
+    n, out = run(creep, window=3, bases=[('批锚', 7), ('全书锚', 1)])
+    if n == 0:
+        fails.append('累积漂移未抓到：段落节律 0.90→3.65（相对全书锚）应判失败')
+    if '累积漂移' not in out:
+        fails.append('抓到了但没有标出"累积漂移"——那就分不清批内波动与跨批累积')
+
+    for f in fails:
+        print('  ✗ ' + f)
+    if not fails:
+        print('  ✓ 漂移检测自测通过（突变 / 锚前不判 / 0→爆发 / 正常不误报 / '
+              '累积漂移只靠累计锚才可见）')
+    return 1 if fails else 0
+
+
 def main():
     parser = argparse.ArgumentParser(description='AI 统计指纹检测（分布层面软指纹）')
-    parser.add_argument('path', help='章节 .md 文件，或 --all 时的项目目录')
+    parser.add_argument('path', nargs='?', help='章节 .md 文件，或 --all 时的项目目录')
     parser.add_argument('--all', action='store_true', help='全书统计（含各章对话比例一致性）')
+    parser.add_argument('--drift', action='store_true',
+                        help='跨章声音漂移检测（自动隐含 --all；流水线窗闸每章跑）')
+    parser.add_argument('--window', type=int, default=3,
+                        help='滚动基线窗口（默认 3）——流水线里应与「笔手领先上限」取同值')
+    parser.add_argument('--base', type=int, default=None,
+                        help='**批锚**章号（门控锚：只有它之后的章被判定）。'
+                             '流水线应传本批首章号，批内重新定基')
+    parser.add_argument('--vol-base', type=int, default=None,
+                        help='**卷锚**章号（本卷第 1 章）——抓「卷内累积漂移」')
+    parser.add_argument('--book-base', type=int, default=None,
+                        help='**全书锚**章号（通常第 1 章，永不滚动）——抓「整本书的累积漂移」。'
+                             '⚠️ 只传 --base 时累积漂移**在定义上不可见**（每批都合格，'
+                             '全书却可以漂到任意远）——这正是"读着不像开头那本书了"'
+                             '能被所有批级闸门放过的原因')
+    parser.add_argument('--brief', action='store_true',
+                        help='只输出问题（流水线每章跑时用——否则报告随章数增长，'
+                             '每章读一遍等于把省下的上下文又花回去）')
+    parser.add_argument('--selftest', action='store_true',
+                        help='漂移判定自测（纯内存，不碰磁盘）——改动漂移逻辑后跑一次')
     args = parser.parse_args()
+
+    if args.selftest:
+        sys.exit(_selftest())
+
+    if not args.path:
+        parser.error('需要给出章节文件或项目目录（或使用 --selftest）')
+
+    if args.drift:
+        args.all = True
 
     if args.all:
         project = Path(args.path)
-        files = sorted(project.glob('第*.md'), key=lambda p: p.name)
+        if not project.is_dir():
+            print(f'[错误] --all 需要项目目录，收到：{args.path}'); sys.exit(1)
+        files = _find_chapters(project)
         if not files:
-            print('[错误] 未找到章节文件'); sys.exit(1)
+            print('[错误] 未找到章节文件（已在 chapters/ 正文/ 章节目录/ 项目根 递归查找）')
+            sys.exit(1)
         results = []
         hard_violations = 0
         for f in files:
             r = analyze_chapter(f)
-            if r:
-                results.append(r)
-                if print_chapter(r):
-                    hard_violations += 1
-        # 全书对话比例一致性
-        if len(results) >= 3:
+            if not r:
+                continue
+            results.append(r)
+            if args.brief:
+                # 静音打印但**保留判定**——不能为了省输出把硬闸门一起省掉
+                with contextlib.redirect_stdout(io.StringIO()):
+                    bad = print_chapter(r)
+            else:
+                bad = print_chapter(r)
+            if bad:
+                hard_violations += 1
+        # 全书对话比例一致性（brief 模式下由 --drift 的«对话占比»项覆盖，不重复输出）
+        if len(results) >= 3 and not args.brief:
             ratios = [r['dialog_ratio'] for r in results]
             cv = statistics.stdev(ratios) / statistics.mean(ratios) if statistics.mean(ratios) > 0 else 0
             print(f'\n===== 全书对话比例一致性 =====')
             print(f'各章对话占比：{"、".join(f"{x*100:.0f}%" for x in ratios)}')
             print(f'变异系数 CV={cv:.2f} → {flag_level(None, cv, [0.15, 0.25, 0.4])}'
                   f' [CV 低=各章对话比例过匀(AI)，高=波动自然(人)]')
+
+        drift_fail = 0
+        if args.drift:
+            # 锚分层：批锚（门控）→ 卷锚 → 全书锚。**层数越多，越能分开
+            # "批内波动"与"累积漂移"**——但这只影响分析深度，不影响退出码口径
+            # （任何一层报警都算失败）。未给锚时退化为"以第 1 章为锚"。
+            _bases = []
+            if args.base:
+                _bases.append(('批锚', args.base))
+            if args.vol_base:
+                _bases.append(('卷锚', args.vol_base))
+            if args.book_base:
+                _bases.append(('全书锚', args.book_base))
+            if not _bases:
+                _bases = [('基线', None)]
+            drift_fail = check_drift(results, window=args.window,
+                                     bases=_bases, verbose=not args.brief)
+        if args.brief:
+            tail = (f'[低费用·窗闸] {len(results)} 章'
+                    f'｜硬性句式超标 {hard_violations} 章'
+                    f'｜声音漂移 {drift_fail} 项')
+            _lbl = [l for l, _n in (('批锚', args.base), ('卷锚', args.vol_base),
+                                    ('全书锚', args.book_base)) if _n]
+            if _lbl:
+                tail += f'（锚：{"+".join(_lbl)}）'
+            print(tail + (' → 合格' if not (hard_violations or drift_fail) else ' → 不合格'))
     else:
         f = Path(args.path)
         if not f.exists():
@@ -511,11 +865,15 @@ def main():
         else:
             print('[提示] 无可统计的正文内容')
             hard_violations = 0
+        drift_fail = 0
 
     # 退出码：只有「硬性句式（先否定再肯定）」是硬闸门——相位文档规定"单章出现 1 次即超标"。
     # 其余指标（转折词/模糊词/顿悟词/明喻/动作/模板短语）保持"报告 + 结合上下文处理"。
     if hard_violations:
         print(f'\n✗ 硬性句式超标 {hard_violations} 处 —— 须逐句重写后再提交')
+        sys.exit(1)
+    if drift_fail:
+        print(f'\n✗ 声音漂移 {drift_fail} 项 —— 逐项处理后再提交')
         sys.exit(1)
     sys.exit(0)
 

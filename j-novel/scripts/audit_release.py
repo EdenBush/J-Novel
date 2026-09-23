@@ -72,6 +72,27 @@ PROPAGATION_RULES = [
     ('半角引号零容忍',        'ai-cliche-blacklist.md', r'半角双引号', r'ASCII'),
     ('破折号趋向清零',        'ai-cliche-blacklist.md', r'破折号', r'破折号'),
     ('万能情绪模板黑名单',     'ai-cliche-blacklist.md', r'空气凝固', r'空气凝固'),
+    # ── 世界设定传导（2026-09-20）──────────────────────────────────────
+    #    子代理只读速查卡 → 这四条世界纪律必须在卡里，否则对它不存在。
+    ('世界设定包·必须内联',    'subagent-brief.md', r'世界设定包', r'世界设定包|世界一致性'),
+    ('专名·禁止同义新词',      'subagent-brief.md', r'禁止另造同义新词', r'禁止另造同义新词|只用表内的词'),
+    ('新词必须回流登记',       'subagent-brief.md', r'新增专名', r'新增专名'),
+    ('硬设定是蓄能装置',       'subagent-brief.md', r'蓄能装置', r'蓄能装置|引信'),
+    # ── 剧情脚手架（2026-09-21）────────────────────────────────────────
+    #    作者画面是流水线上最保人味的素材：主编挖得到（plot-scaffold）、写手要保住（速查卡）。
+    ('作者画面·给他不给解释',   'plot-scaffold.md', r'给画面，不给解释|不给解释', r'不要解释|不给解释'),
+    ('作者画面·是作者的眼睛',   'plot-scaffold.md', r'作者自己的眼睛', r'作者自己的眼睛'),
+    # ── 开场不许同质（2026-09-21）──────────────────────────────────────
+    #    事故：两条规则（rewrite-playbook ②招 × chapter-craft 日常进入型）
+    #    叠加被过度执行 → 三到五章开头都变成"时间＋环境空镜"。
+    #    规则本身没错，错在**示范都是时间/环境起手且没有禁止同构**。
+    ('日常进入≠环境空镜',      'chapter-craft.md',
+     r'时间＋环境空镜|日常进入 ≠', r'开场不许同质|别和它同型'),
+    # ── 章末不许公式化（2026-09-21）───────────────────────────────────
+    #    事故：五章结尾全是"叙述 + 余味"，其中两章连着用「反正…」。
+    #    闸门只查大纲的「章末型」字段（标签）→ 标签轮换了、手感没换，查不出来。
+    ('章末·选型≠落笔',         'hook-techniques.md',
+     r'选对「型」≠|选对.型.≠', r'章末不许公式化|换落笔形态'),
 ]
 
 
@@ -458,7 +479,7 @@ def check_cross_script(root: Path):
     # 必须查 **① 在不在名单里 ② import 后有没有被覆盖 ③ 定义了有没有被调用**。
     # ══════════════════════════════════════════════════════════════════
 
-    # ⓪ 所有脚本（含 wordcount/continuity）都必须在名单里，且必须 import _shared
+    # ⓪ 所有脚本（含 wordcount/continuity）都必须在共享层名单里（检查在下方）
     _SHARED_FILES = ('check_human_rhythm.py', 'check_aistyle.py',
                      'check_chapter_wordcount.py', 'check_continuity.py')
 
@@ -498,20 +519,25 @@ def check_cross_script(root: Path):
             chunks.append(chunk)
         return '\n'.join(chunks)
 
-    _SHARED_IMPORT = re.compile(r'(?m)^[ \t]*from _shared import')
+    # ⓪ 每个脚本都必须**真的委托** _shared（取正文 + 读文件两个符号都要在）
+    #
+    # ⚠️ 判据必须是「**委托符号**在不在 import 里」，**不能**是「有没有那一行」。
+    #    2026-09-21 故障注入实测：check_aistyle.py 为了找章节文件加了一个
+    #    try/except 兜底 `from _shared import find_chapter_files` —— 于是把
+    #    **真正的委托 import 整行注释掉**之后，只查"存在任意 `from _shared import`"
+    #    的旧写法**照样通过**（被那行兜底 mask 掉了）。
+    #    一个合法的兜底 import 悄悄让守卫失效，而守卫看起来还在。
+    #    **教训：守卫要盯"语义有没有满足"，不是"字符串在不在"。**
+    _NEED_SHARED = ('extract_body', 'read_text')
     for f in _SHARED_FILES:
         src = read_text(root / 'scripts' / f)
-        if not _SHARED_IMPORT.search(src):
-            issues.append(f'{f} 没有走 _shared —— '
-                          f'各写一份会导致同一章在多个脚本里分母不同（实测曾差 12.6%）')
-
-    # ① 取正文与读文件都必须真的委托 _shared
-    #    注意：必须匹配**顶层非注释**的 import —— 用 `in src` 判断会被注释掉的
-    #    `# from _shared import ...` 骗过（自测时真踩到过）。
-    for f in _SHARED_FILES:
-        src = read_text(root / 'scripts' / f)
-        if not re.search(r'extract_body', _shared_imports(src)):
-            issues.append(f'{f} 没有 import _shared 的 extract_body')
+        imp = _shared_imports(_code_only(src))
+        for _sym in _NEED_SHARED:
+            if _sym not in imp:
+                issues.append(
+                    f'{f} 没有走 _shared —— 没有委托 `{_sym}`（自己写了一份，'
+                    f'或委托 import 被注释掉了）。各写一份会让同一章在不同脚本里'
+                    f'分母不同（实测曾差 12.6%）')
 
     # ② read_text 也不许各写一份（旧的"中文占比最高"启发式会把 UTF-8 误判成 utf-16）
     #    ⚠️ read_text 的名单**必须含 check_chapter_wordcount.py** ——
@@ -521,10 +547,8 @@ def check_cross_script(root: Path):
     for f in _SHARED_FILES:
         src = read_text(root / 'scripts' / f)
         imp = _shared_imports(src)
-        if 'read_text' not in imp:
-            issues.append(f'{f} 的 read_text 没有委托 _shared.read_text —— '
-                          f'编码启发式/硬编码会把非 UTF-8 文件读成乱码（实测 GBK 少算 96%）')
-        elif not re.search(r'_shared_read_text\s*\(', src):
+        # 「read_text 有没有 import」由 ⓪ 统一管；这里只管**调用点**——
+        if not re.search(r'_shared_read_text\s*\(', src):
             # ⚠️ "import 了但一次都没调"——check_aistyle 就这么漏过：
             #    它 import 了 _shared_read_text，实际读盘走本地的 read_text_any()。
             #    **只查"有没有 import"的守卫会完全放过它。**
@@ -676,6 +700,391 @@ def check_cross_script(root: Path):
             if _g not in _body:
                 issues.append(f'核心指南 `{_g}` 不在{_label}里 —— '
                               f'清单是 Agent 逐章照做的唯一清单，不在清单里 = 读点靠运气')
+
+    # ⑧ 世界设定的传导链必须完整（2026-09-20 新增）
+    #    背景：`00-故事圣经.md` 曾在整个 SKILL 里**只有一处提及**（项目结构树），
+    #    **创作期零读点** → 世界观在计划期写完就断了链。
+    #    症状：落笔时不是一个庞大的世界；子代理之间不是同一个世界；设定被吃掉。
+    #    这条守卫盯住链上的**每一环**——任何一环被顺手删掉，世界观就又断了。
+    _chain = []
+    _brief = read_text(root / 'references' / 'guides' / 'subagent-brief.md')
+    _card2 = read_text(root / 'references' / 'guides' / 'quick-reference-card.md')
+    _p3b = read_text(root / 'references' / 'flows' / 'phase3-writing.md')
+    _idx = read_text(root / 'references' / 'guide-index.md')
+
+    if not re.search(r'世界设定包', _brief):
+        _chain.append('`subagent-brief.md` 的任务包里没有「世界设定包」槽位'
+                      '（子代理会各自发明一套世界）')
+    if not re.search(r'世界设定包已内联', _brief):
+        _chain.append('`subagent-brief.md` 的「主编派发检查清单」没有核对「世界设定包已内联」')
+    if not re.search(r'专有名词表', _brief):
+        _chain.append('`subagent-brief.md` 里没有「专有名词表」（禁止另造同义新词的关键约束）')
+    if not re.search(r'世界一致性', _card2):
+        _chain.append('`quick-reference-card.md` 里没有「世界一致性」——'
+                      '子代理只读这一页，等于这条约束对它不存在')
+    if not re.search(r'世界切片', _p3b):
+        _chain.append('`phase3-writing.md` 的执行清单没有「世界切片」动作 —— '
+                      '主 Agent 每章读到的世界只有大纲/人物/细纲')
+    if not re.search(r'世界切片|一、世界观手册', read_text(root / 'SKILL.md')):
+        _chain.append('`SKILL.md` 的每章最小必做清单没有世界设定读点')
+    if not re.search(r'世界切片', _idx):
+        _chain.append('`guide-index.md` 里没有「世界切片／设定回流」的动作映射')
+    if _chain:
+        issues.append('世界设定传导链断裂：\n      · ' + '\n      · '.join(_chain))
+
+    # ⑨ 剧情脚手架的传导链必须完整（2026-09-21 新增）
+    #    脚手架填的是流程里的一个**真空区**：作者已有的具体剧情设想
+    #    （"第 3 章遇到铁匠""第 5 章当众打脸"）既不是"内核"（Phase 1 验收的 12 项），
+    #    也不是细纲（Phase 2 的下游产物）→ 没有采集入口 → 被 Agent 推导的大纲盖掉。
+    #    链上任何一环被删，这个真空区就又回来了。
+    _ps_chain = []
+    if not (root / 'references' / 'guides' / 'plot-scaffold.md').is_file():
+        _ps_chain.append('`references/guides/plot-scaffold.md` 不存在（脚手架主线指南缺失）')
+    _p1 = read_text(root / 'references' / 'flows' / 'phase1-interview.md')
+    if not re.search(r'剧情脚手架', _p1):
+        _ps_chain.append('`phase1-interview.md` 没有「剧情脚手架」环节 —— 作者的剧情设想没有采集入口')
+    _p2 = read_text(root / 'references' / 'flows' / 'phase2-planning.md')
+    if not re.search(r'脚手架对账', _p2):
+        _ps_chain.append('`phase2-planning.md` 没有「脚手架对账」—— 大纲可能盖掉作者明确要的东西')
+    if not re.search(r'作者画面', _brief):
+        _ps_chain.append('`subagent-brief.md` 任务包里没有「作者画面」—— '
+                         '流水线上最保人味的素材传不到写手手上')
+    if not re.search(r'作者的画面', _card2):
+        _ps_chain.append('`quick-reference-card.md` 里没有「作者的画面」——'
+                         '子代理只读这一页，等于它不知道该保住这段')
+    _idx2 = read_text(root / 'references' / 'guide-index.md')
+    if not re.search(r'plot-scaffold', _idx2):
+        _ps_chain.append('`guide-index.md` 里没有 `plot-scaffold.md` 的动作映射')
+    if not re.search(r'剧情脚手架', read_text(root / 'SKILL.md')):
+        _ps_chain.append('`SKILL.md` 的 Phase 1 描述里没有提及剧情脚手架')
+
+    # ── P3 续航链（2026-09-21 下午新增）：写作期的方向对齐 ──
+    #    这是 Phase 3「禁止确认」的一个**有边界的例外**，和锚点章同级。
+    #    任何一环被删，要么新机制失效，要么"疯狂创作"被无边界打断。
+    _p3b2 = read_text(root / 'references' / 'flows' / 'phase3-writing.md')
+    _psg = read_text(root / 'references' / 'guides' / 'plot-scaffold.md')
+    if not re.search(r'两个例外|两条例外', _p3b2):
+        _ps_chain.append('`phase3-writing.md` 没有声明「两个例外」—— '
+                         'Phase 3 的"禁止确认"铁律会把脚手架对齐直接压死')
+    if not re.search(r'意图浓度', _psg):
+        _ps_chain.append('`plot-scaffold.md` 里没有「意图浓度」—— '
+                         '介入频次会退回"按章数"，对弱意图作者是负担、对强意图作者是缺位')
+    if not re.search(r'方向对齐四步|摊素材', _psg):
+        _ps_chain.append('`plot-scaffold.md` 里没有「方向对齐四步」—— '
+                         '先挖意图→再摊素材→才给建议的顺序会丢，退化成"直接给建议"（会带偏作者）')
+    if not re.search(r'两条边界|内容边界', _psg) or not re.search(r'\(?\[\s*\]\s*7\.5', _p3b2):
+        _ps_chain.append('`phase3-writing.md` 每章清单里没有 7.5「剧情脚手架对齐检查」—— '
+                         '四条触发点没有落进 Agent 逐章照做的清单，等于不存在')
+    if not re.search(r'剧情脚手架对齐', read_text(root / 'SKILL.md')):
+        _ps_chain.append('`SKILL.md` 的 Phase 3 描述里没有提「剧情脚手架对齐」这个例外')
+
+    if _ps_chain:
+        issues.append('剧情脚手架传导链断裂：\n      · ' + '\n      · '.join(_ps_chain))
+
+    # ⑩ 低费用模式的口径必须一致（2026-09-21 新增）
+    #    事故：costMode: low 的设计散落在 8 个文件里、**各写一份**（phase3 三处 / phase4 两处 /
+    #    guide-index / 速查卡 / review-agent / review-agent…）。这轮重新设计后，
+    #    哪里还留着旧说法，就会出现"一处说 A、另一处说 B"的自相矛盾——
+    #    而 Agent 会挑它读到的那个版本执行。**所以本文件是 costMode 的唯一事实源，其余只准引用。**
+    _low = read_text(root / 'references' / 'guides' / 'low-cost-mode.md')
+    _lowbad = []
+    # 「文档在引用旧说法」的行不算违规——这些指南是教学性的，会主动引用错版本
+    # 来解释"为什么原来那样是错的"。**（本文件多处复用这个排除表）**
+    _QUOTING_OLD = ('修正', '原来', '原先', '旧设计', '老设计', '不成立', '曾经', '❌')
+    # ① 不能再写"默认串行"（旧设计的错误判断）
+    #    ⚠️ 排除词必须**多写几个同义写法**（旧设计／老设计／是错的／方向是反／❌）：
+    #    这条守卫初版只排除了「旧设计」，而正文里另一处写的是「**老**设计"默认串行"，
+    #    方向是反的」→ 立刻误报自己。
+    #    **这是本项目第四次踩"同一概念有多种写法"的坑**（前三次：两个例外/两条例外、
+    #    _all_docs 两处调用、清单里两处）。**写校验规则前先 grep 一遍所有写法。**
+    _OLD_DESIGN_MARKS = ('旧设计', '老设计', '是错', '方向是反', '❌', '推翻', '旧的是')
+    for _ln in _low.split('\n'):
+        if re.search(r'默认\s*(serial|串行)', _ln) and not any(k in _ln for k in _OLD_DESIGN_MARKS):
+            _lowbad.append('`low-cost-mode.md` 又写回「默认串行」——串行会让主 Agent 上下文'
+                           '线性累积、cacheRead 反而更大；批量场景必须走链式流水线')
+            break
+    if not re.search(r'链式流水线', _low):
+        _lowbad.append('`low-cost-mode.md` 里没有「链式流水线」——'
+                       '批量组织是 low 模式**最大的一笔省**（子代理上下文独立、不累积）')
+    if not re.search(r'判断项.{0,8}合并|合并成\s*1\s*次|合并成一次', _low):
+        _lowbad.append('`low-cost-mode.md` 没有「判断项合并」——'
+                       '质检会退回"砍检查项目"而不是"合并调用次数"')
+    if not re.search(r'人味不降', _low):
+        _lowbad.append('`low-cost-mode.md` 没有「人味不降清单」——low 会被读成"可以牺牲人味"')
+    # ② 其它文件里不能残留旧说法
+    #    ⚠️ 名单必须**含 SKILL.md / guide-index.md / phase2-planning.md**：
+    #    · 2026-09-21 发现 SKILL.md 的「模式开关」一节还在写旧设计（旧名单只查 flow 文件）；
+    #    · 2026-09-23 发现 **phase2-planning.md 的「模式选择」提示**也还在写——
+    #      而那是**最坏的位置**：它在**作者做选择的这一刻**说"低费用模式…质量略降"，
+    #      作者会带着这个预期去选。**选项描述里的口径污染，比说明里的严重得多。**
+    #    · 判据必须**按行排查引用行**（本文件就有一段「修正：原来写的是……」在引用旧文案）。
+    _OLD_CLAIM = re.compile(r'只跑\s*3\s*个脚本|只跑三脚本|只查\s*3\s*脚本')
+    #    ⚠️ 「质量下降」的判据必须**要求同现**（本行同时出现 low 与降质说法），
+    #    并且排除**否定句**。初版只查 `质量略降|质量下降|牺牲质量`，立刻炸出 4 处假阳性：
+    #      · `EC:76`「质量下降，用户可追问」（说的是跳过【标准】级指令，与 low 无关）
+    #      · `chained:177` / `parallel:268` / `low-cost:169`
+    #        「这**不是**牺牲质量换省钱」——**说的是反话**
+    #    **这是本项目第 7 次踩"存在性判据被无关文本/否定句命中"的坑。**
+    #    规律：判据要么**要求同现**（两个词在同一行），要么**排除否定**。
+    _LOW_QUALITY = re.compile(
+        r'(?:低费用|低成本|低消耗|low)[^\n]{0,40}(?:质量略降|质量会降|质量下降)'
+        r'|(?:质量略降|质量会降|质量下降)[^\n]{0,40}(?:低费用|低成本|低消耗|low)')
+    _EXCLUDE = _QUOTING_OLD + ('并不', '误读', '过时', '反话')
+    # ⚠️ 「否定排除」只给**降质说法**用（"这**不是**牺牲质量换省钱"是反话）。
+    #    初版把 '不是' 也套在 `_OLD_CLAIM` 上 → 立刻造成**假阴性**：
+    #    SKILL.md 的 low 描述里有一句"组织形式走链式流水线 + 批次（**不是**串行……）"，
+    #    于是同一行里的「只跑 3 个脚本」被整行豁免，守卫不响。
+    #    （故障注入用例 ㊵ 在改动后立刻变红，抓到的是回归。）
+    #    **规律：排除词要按"它在否定什么"限定作用域，不能全表共用。**
+    _EXCLUDE_NEG = _EXCLUDE + ('不是',)
+    for _f in ('SKILL.md', 'references/guide-index.md',
+               'references/flows/phase2-planning.md',
+               'references/flows/phase3-writing.md', 'references/flows/phase4-validation.md',
+               'references/guides/chained-pipeline.md', 'references/guides/parallel-workflow.md'):
+        _t = read_text(root / _f)
+        for _ln in _t.split('\n'):
+            if any(k in _ln for k in _EXCLUDE):
+                continue
+            if _OLD_CLAIM.search(_ln):
+                _lowbad.append(f'`{_f}` 里还留着旧说法「只跑 3 个脚本」——'
+                               f'机械项是**脚本**（0 reasoning token），砍它等于白扔质量')
+                break
+        for _ln in _t.split('\n'):
+            if any(k in _ln for k in _EXCLUDE_NEG):    # ← 只有这里需要否定排除
+                continue
+            if _LOW_QUALITY.search(_ln):
+                _lowbad.append(f'`{_f}` 把 low 模式描述成「质量略降」——'
+                               f'low 降的是"同样的检查做几次"，不是"检查多严"；'
+                               f'它的人味项目一个不砍（最坏的位置是"选项描述"：'
+                               f'作者会带着这个预期去选）')
+                break
+        # 「默认串行」同理（引用旧设计来说明"为什么错"的行不算）
+        for _ln in _t.split('\n'):
+            if re.search(r'默认\s*(serial|串行)', _ln) and \
+                    not any(k in _ln for k in _EXCLUDE):
+                _lowbad.append(f'`{_f}` 里还写着 low 模式「默认串行」——'
+                               f'串行让主 Agent 上下文线性累积，cacheRead 反而更大')
+                break
+    # ③ 调用预算数字必须全网一致
+    _budget_bad = [f for f in ('SKILL.md', 'references/execution-contract.md',
+                               'references/flows/phase3-writing.md',
+                               'references/flows/phase4-validation.md',
+                               'references/guides/quick-reference-card.md',
+                               'references/guides/low-cost-mode.md')
+                   if re.search(r'6[–-]10\s*次', read_text(root / f))]
+    if _budget_bad:
+        _lowbad.append('调用预算数字不一致（残留旧值 6–10 次）：' + '、'.join(_budget_bad))
+    if _lowbad:
+        issues.append('低费用模式口径不一致：\n      · ' + '\n      · '.join(_lowbad))
+
+    # ── 低消耗 × 链式流水线：质量/效率接缝（2026-09-21）────────────────
+    # 这一组盯的是"又快又低 = 质量漏水"的三个具体洞：
+    #   ① 主编读正文 → 子代理隔离省下的钱被它一个人花回去（**成本洞**）
+    #      旧文档甚至写着主编"必持全部真实章节"，理由是"窗口够大"——
+    #      那是窗口够不够的论证，不是成本的论证（实测 97.8% 是 cacheRead）。
+    #   ② 跨章缺陷批末才发现 → 回头修，成本超线性（**质量洞**）
+    #   ③ 磨手改结尾 → 下一章承接的结尾被掉包（**质量洞，且两边都通顺、无脚本会报**）
+    _pipebad = []
+    _low2 = read_text(root / 'references' / 'guides' / 'low-cost-mode.md')
+    _chain = read_text(root / 'references' / 'guides' / 'chained-pipeline.md')
+    _pw = read_text(root / 'references' / 'guides' / 'parallel-workflow.md')
+
+    # ① 主编不许再被要求持有正文（成本洞的源头）
+    #    ⚠️ 必须**按行排除"文档在引用旧说法"的行**：
+    #    这些指南是教学性的，会**主动引用错版本**来解释"为什么原来那样是错的"
+    #    （本文档就有一段「⚠️ 修正：这里原来写的是……」）。
+    #    不做排除 → 守卫会抓到自己的"错误示范"，报一个假问题。
+    #    **这是本项目第 5 次踩"同一概念有多种写法 / 旧文本被引用"的坑**
+    #    （前四次：两个例外／两条例外、_all_docs 两处调用、清单两处、旧设计／老设计）。
+    #    **写校验正则前先 grep 一遍：这个概念在文档里出现过几次、以哪些面貌出现。**
+    #    （`_QUOTING_OLD` 排除表在「⑩ 低费用模式口径」块开头统一定义，本处只复用。）
+    for _ln in _pw.split('\n'):
+        if '全部真实章节' in _ln and not any(k in _ln for k in _QUOTING_OLD):
+            _pipebad.append('`parallel-workflow.md` 又写回主编"持有全部真实章节"——'
+                            '主编是流水线里活得最久的角色，它读过的每一章都会跟着之后'
+                            '每一次调用被重发；子代理隔离省下的钱会被它一个人花回去')
+            break
+
+    # ② 三条机制必须都在（缺一条就是一个洞）
+    for _kw, _what, _where in (
+        ('make_handoff', '主编零正文的支点（交接卡）', _low2),
+        ('发现缺陷的时点', '闸门定位判据（发现 ≤ 定稿）', _low2),
+        ('窗闸', '跨章项每章跑的滚动窗口闸门', _low2),
+        ('只向前修', '缺陷路由（系统缺陷不回改已定稿章）', _low2),
+        ('主编零正文', '主编不读正文的机制', _chain),
+        ('边界冻结', '文本层的接口冻结（防接力棒掉包）', _chain),
+        ('窗闸窗口', '窗口与领先上限必须同值的对齐说明', _chain),
+    ):
+        if _kw not in _where:
+            _pipebad.append(f'缺少「{_what}」（关键词 {_kw}）—— '
+                            f'这是一条流水线与低消耗模式的接缝，缺了就是"跑得飞快但错误同样飞快"')
+
+    # ③ 脚本必须真的支持文档里写的命令
+    #    ⚠ 这条防的是上一轮结构审计发现的那类 P0："文档里写着一条命令"和
+    #      "那条命令有效"**完全不相关**（4 个 P0 里 2 个属于这类）。
+    #      闸门不能只靠人工端到端跑过才保证有效——这里做静态交叉比对。
+    #    ⚠ 去重键必须是 (脚本, 参数) 而不是参数本身：
+    #      `--window` 在 check_repetition 与 check_aistyle 里都有，
+    #      用参数去重会让第二个脚本**根本不检查**（旧写法就是这么漏的）。
+    _SCRIPT_RX = re.compile(r'scripts/([a-z_]+\.py)((?:\s[^\n]*)?(?:\\\n[^\n]*)*)')
+    _cmd_flags = {}
+    for _m in _SCRIPT_RX.finditer(_low2):
+        _script, _args = _m.group(1), _m.group(2)
+        _cmd_flags.setdefault(_script, set()).update(
+            re.findall(r'(?<![\w-])(--[a-z][a-z0-9\-]*)', _args))
+    for _script, _flags in sorted(_cmd_flags.items()):
+        _sp = root / 'scripts' / _script
+        if not _sp.is_file():
+            _pipebad.append(f'`low-cost-mode.md` 引用了不存在的脚本 `scripts/{_script}`')
+            continue
+        _src = read_text(_sp)
+        for _fl in sorted(_flags):
+            if _fl not in _src:
+                _pipebad.append(
+                    f'`low-cost-mode.md` 里的 `{_script} {_fl}` 在该脚本里**不存在** —— '
+                    f'"文档写了命令"≠"命令有效"（脚本会直接报错退出，闸门形同虚设）')
+
+    def _declares(src: str, flag: str) -> bool:
+        """脚本是否**声明**了这个参数（`add_argument('--flag'`）。
+
+        ⚠️ 不能只查"字符串在不在"：`--selftest` 在 check_aistyle.py 里出现**两次**
+        （`add_argument` + `parser.error(... 或使用 --selftest)`）。
+        按"存在性"判 → 把声明改坏、只要那句提示文案还在，守卫就**不响**。
+        **这是本项目第 6 次踩"同一概念在文件里出现多处"的坑**
+        （前五次：两个例外／两条例例、_all_docs 两处调用、清单两处、旧设计／老设计、
+        全部真实章节在 parallel-workflow 里两处）。
+        **规律：任何"存在性"判据都要先 grep 一遍 —— 有几处？哪一处才是真正的声明？**
+        """
+        return bool(re.search(r"add_argument\(\s*['\"]" + re.escape(flag) + r"['\"]", src))
+
+    for _script, _req, _why in (
+        ('check_repetition.py', '--window', '窗闸需要滚动窗口'),
+        ('check_repetition.py', '--brief', '窗闸报告必须定长'),
+        ('check_aistyle.py', '--drift', '声音漂移检测'),
+        ('check_aistyle.py', '--brief', '窗闸报告必须定长'),
+        ('check_aistyle.py', '--selftest',
+         '漂移判定的自测——判据的坑（基线前误判、0→爆发漏抓）改完必须能随时复验，'
+         '不必等真实项目在手边'),
+        ('make_handoff.py', '--check', '交接卡过期检测（边界冻结的唯一抓手）'),
+        ('audit_tokens.py', '--traces',
+         '成本审计的**真实数据源** —— 它原来找 `<项目>/AGENT工作日志/session.jsonl`，'
+         '而该目录**从未被任何环节产出**（项目里没有、脚本里也没有写它的代码）：'
+         '工具本身就是"有校验点、却指向一个不存在的生成点"的孤儿'),
+        ('check_contract.py', '--window', '契约校验要能按窗闸形态跑（每章一次）'),
+        ('check_contract.py', '--brief', '同上：窗闸报告必须定长'),
+        ('check_repetition.py', '--imagery', '意象配额（唯一的真孤儿，已脚本化）'),
+        ('make_task_package.py', '--check',
+         '任务包校验（缺槽位 = 拒绝开工；超预算 = 上下文"被乘数"失控）'),
+        ('make_task_package.py', '--write', '任务包装配（脚本能拿到的自动填）'),
+        ('make_workorder.py', '--archive',
+         '★ 每章质检那一步的入口（内部跑完全部机械脚本 + 按退出码登记缺陷类型 + 写工单）'),
+        ('make_workorder.py', '--retry', '把 retryCount **当场落盘**——不落盘则良率不可统计'),
+        ('make_workorder.py', '--report', '★ 批末出良率与缺陷帕累托（决定改哪条规则）'),
+    ):
+        if not _declares(read_text(root / 'scripts' / _script), _req):
+            _pipebad.append(f'`{_script}` 没有声明参数 {_req} —— {_why}'
+                            f'（否则"每章重读报告"会把省下的上下文又花回去）')
+
+    # ④ 关键脚本必须存在
+    for _s, _why in (('make_handoff.py', '主编零正文的支点'),
+                     ('check_contract.py', '并行写作的接口定义校验（契约 diff）'),
+                     ('make_task_package.py', '任务包装配 + 预算 + 校验')):
+        if not (root / 'scripts' / _s).is_file():
+            _pipebad.append(f'缺少 `scripts/{_s}` —— {_why}，机制落不了地')
+
+    if _pipebad:
+        issues.append('低消耗流水线口径不一致：\n      · ' + '\n      · '.join(_pipebad))
+
+    # ⑤ **模块级的全局副作用必须幂等**（2026-09-23 新增）
+    #    实测：12 个脚本各自在模块级写 `sys.stdout = io.TextIOWrapper(sys.stdout.buffer, ...)`，
+    #    于是**任何一个脚本 import 另一个脚本就崩**：
+    #        ValueError: I/O operation on closed file   (lost sys.stderr)
+    #    原因：`sys.stdout` 已经是 TextIOWrapper 时，`.buffer` 是**共用的**底层 buffer；
+    #    再包一层后，旧 wrapper 被 GC 回收会**连底层 buffer 一起关掉**。
+    #    触发场景：`make_task_package.py` 需要复用 `check_contract` / `make_handoff` 的解析逻辑。
+    #    **换言之：这 12 个脚本此前是"不可被复用"的**——而"能复用"是任何工程化的前提。
+    #    修法：统一走 `_shared.ensure_utf8_stdio()`（幂等）。
+    #    ⚠️ 扫描前必须 `_code_only()` 剥注释 —— 否则这条守卫会**匹配到它自己的注释**
+    #    （上面那段说明里就引用了这个模式）。这是本项目第 8 次踩
+    #    "存在性判据命中无关文本"，而本文件里**早就有 `_code_only()` 专治这个**：
+    #    **规律：写任何"按模式扫描源码"的守卫，第一件事是套 `_code_only()`。**
+    _raw_wrap = [p.name for p in sorted((root / 'scripts').glob('*.py'))
+                 if p.name != '_shared.py'
+                 and re.search(r'TextIOWrapper\(\s*sys\.(stdout|stderr)\.buffer',
+                               _code_only(read_text(p)))]
+    if _raw_wrap:
+        issues.append('脚本用了**非幂等**的 stdio 包装（会让"脚本互相 import"直接崩）：'
+                      + '、'.join(_raw_wrap)
+                      + ' —— 必须改用 `_shared.ensure_utf8_stdio()`。'
+                        '模块级的全局副作用不幂等时，"被 import"这个动作本身就会改变程序状态。')
+
+    # ── 「一致性机制」的三站齐备（2026-09-23 新增）──────────────────────
+    # 判据来自这一轮的审计结论：**一条机制要生效，必须走完三站**
+    #   ① 生成点（信息在哪一步被产出）
+    #   ② 交付点（怎么进入执行者的上下文）
+    #   ③ 校验点（怎么知道它被遵守了）
+    # **缺任何一站机制就死了**，而且死法不同：缺生成点=不存在；缺交付点=看不到；
+    # 缺校验点=不可证伪。实测：文风线六项机制里只有一项三站齐全。
+    #
+    # 这组守卫的价值不只是"盯住这六条"——它是**第一个能自动发现孤儿的守卫**：
+    # 任何"文档里定义了、却没有任何执行链引用"的东西都会被它抓出来。
+    _S = read_text(root / 'SKILL.md')
+    _P3 = read_text(root / 'references' / 'flows' / 'phase3-writing.md')
+    _P2 = read_text(root / 'references' / 'flows' / 'phase2-planning.md')
+    _SB = read_text(root / 'references' / 'guides' / 'subagent-brief.md')
+    _RA = read_text(root / 'references' / 'guides' / 'review-agent.md')
+    _BT = read_text(root / 'references' / 'guides' / 'bible-template.md')
+    _OT = read_text(root / 'references' / 'guides' / 'outline-template.md')
+    _mechbad = []
+    for _kw, _what, _where, _station in (
+        # ── 契约：主逻辑机制。此前"读点 12 处、产出 0 处、校验 0 处"
+        #    ⚠️ 关键词必须查到**键名**（`进入·位置时间`），不能只查"接口契约"——
+        #       后者改个标题也还在，验不出"栏位是否存在"。（用例 ㊷ 一开始就是这么漏的。）
+        ('进入·位置时间', '细纲规格里有契约**键值栏位**（生成点）', _P2, '生成点'),
+        ('check_contract.py', '契约校验接进 Phase 3 写前（交付点）', _P3, '交付点'),
+        ('check_contract.py', '契约校验接进 SKILL 每章动作', _S, '交付点'),
+        ('接口契约（本章）', '任务包里契约是一等槽位', _SB, '交付点'),
+        # ── 三层锚：治"累积漂移在定义上不可见"
+        ('--book-base', '三层锚的累计基线接进 Phase 3 质检', _P3, '交付点'),
+        ('--book-base', '三层锚的累计基线在主入口有说明', _S, '交付点'),
+        ('锚点滚动', '锚点滚动进了执行清单（此前是孤儿：两套清单都没有它）', _S, '交付点'),
+        # ── 意象配额：从孤儿变成脚本
+        ('--imagery', '意象配额脚本化并接进 Phase 3', _P3, '校验点'),
+        # ── 独立质检的独立性：RA 自己和自己矛盾过
+        ('独立但极轻', 'low 模式下"独立质检不并入"已声明', _RA, '交付点'),
+        ('独立质检另起子代理', 'Phase 4 查痕口径已同步', 
+         read_text(root / 'references' / 'flows' / 'phase4-validation.md'), '校验点'),
+        # ── 伏笔单载体
+        ('唯一权威载体', '伏笔表已声明单一载体（防双载体同名漂移）', _OT, '生成点'),
+        ('卷终汇总视图', '圣经的伏笔表已降级为派生视图', _BT, '生成点'),
+        # ── 台账例外
+        ('对铁律六的显式例外', 'low 的台账策略已显式声明为例外', 
+         read_text(root / 'references' / 'guides' / 'low-cost-mode.md'), '生成点'),
+        # ── 成本基线的可复现性（2026-09-23）
+        ('--traces', '成本审计指向**真实存在**的数据源（平台轨迹）',
+         read_text(root / 'references' / 'guides' / 'token-efficiency.md'), '生成点'),
+        ('每次调用平均重发上下文', '成本判据是**绝对量**（每次调用重发多少），不只是比例',
+         read_text(root / 'references' / 'guides' / 'token-efficiency.md'), '校验点'),
+        # ── 工单 / 良率 / 返工落盘（2026-09-23）—— 这一组盯的是「有没有人真的在记数」
+        ('make_workorder.py', '★ 工单接入 Phase 3 每章质检（否则返工永远不可统计）',
+         _P3, '交付点'),
+        ('make_workorder.py', '★ 工单接入主入口十动作', _S, '交付点'),
+        ('本章返工轮次', '`retryCount` 已落盘（此前只在铁律七的规则描述里出现过）',
+         read_text(root / 'references' / 'guides' / 'creation-ledger.md'), '生成点'),
+        ('indicator-waived', '指标让步接收（给耦合指标一个合法的终止条件）',
+         read_text(root / 'references' / 'execution-contract.md'), '校验点'),
+        ('修法①：指标分层', 'CTQ 分层（3 个硬门，其余降为参考指标）',
+         read_text(root / 'references' / 'execution-contract.md'), '校验点'),
+        ('自适应抽检', '判断项按连续合格章数动态调强度', _P3, '交付点'),
+        ('本批已用过的开场', '前馈槽位（给事实不给目标，直接消掉跨章同质类返工）',
+         read_text(root / 'scripts' / 'make_task_package.py'), '交付点'),
+    ):
+        if _kw not in _where:
+            _mechbad.append(f'缺少「{_what}」——关键词 `{_kw}`（**{_station}**）。'
+                            f'一条机制缺这一站就等于不存在：'
+                            f'缺生成点=没东西可填；缺交付点=执行者看不到；缺校验点=不可证伪')
+    if _mechbad:
+        issues.append('一致性机制的「三站」不齐：\n      · ' + '\n      · '.join(_mechbad))
 
     # 清单 C：两份清单的**指南读点必须一致**（只写在一边的读点，另一边执行时会漏）
     #    两套编号同时存在（SKILL.md 10 个动作 vs phase3 的 0–7），

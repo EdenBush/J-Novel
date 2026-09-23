@@ -63,10 +63,16 @@
 
 已经脚本化的（本项目）：
 - `check_human_rhythm.py` / `check_aistyle.py` / `check_repetition.py` / `check_chapter_wordcount.py` —— AI 味与字数
+  （`check_aistyle.py --drift` 兼做**声音漂移**；`--selftest` 是它的纯逻辑自测）
 - `check_continuity.py` —— 章节边界连续性
 - `check_batch_gate.py` —— 批次放行闸门（乱序完成/字数/质检痕迹/台账推进）
-- `audit_tokens.py` —— 成本纪律（调用数/脚本数/改写次数/指南重复读）
+- **`make_handoff.py` —— 交接卡（主编零正文的支点）+ 边界冻结的过期检测**（见 `low-cost-mode.md` 第三节）
+- `check_worldbuilding.py` —— 设定激活率 / 未登记新词
+- `audit_tokens.py --traces` —— 成本纪律（★ **每次调用平均重发上下文** / 调用数 / 脚本数 / 改写次数 / 指南重复读）。
+  ⚠️ 它原来找 `<项目>/AGENT工作日志/session.jsonl`——**该目录从未被任何环节产出**
+  （项目里没有、脚本里也没有写它的代码），工具本身就是个孤儿。真实 usage 在 `~/.workbuddy/traces/`。
 - **`audit_release.py` —— SKILL 自身的发布前 QA（引用/语法/阈值/调用链/结构/残留 + 分离回归）**
+- **`test_guards.py` —— 守卫自身的故障注入（"加了守卫"≠"守卫有效"）**
 
 ---
 
@@ -165,12 +171,22 @@ python scripts/audit_release.py --root /path/to/j-novel --regress
 ```bash
 # 故障注入用例（自动备份 → 注入 → 检测 → 还原 → 确认重新全绿）
 python scripts/test_guards.py     # 退出码 0 = 全部被抓到（用例数以运行时输出的 n/n 为准）
+
+# 纯逻辑判据（不碰磁盘）：改了判据就跑一次，不必等真实项目在手边
+python scripts/check_aistyle.py --selftest    # 漂移判定：突变 / 基线前不判 / 0→爆发 / 不误报
 ```
 
 **不做这一步，只是又造了一个"看起来在工作"的闸门。** 本轮的实测记录：
 `test_guards.py` 的前身（人工版）**连续抓到 4 个"守卫自身失效"**——
 用 `in src` 判断被注释骗过、守卫扫到 docstring 里的函数名、调用计数把注释也算进去、
 数字漂移正则不认 markdown 的 `**14 个**`。**每一个都是"我以为守卫有效"。**
+
+**2026-09-21 又添一种新形态（第 5 次）**：给 `check_aistyle.py` 加了一个
+`try/except` 兜底 `from _shared import find_chapter_files` 之后，
+守卫⓪（"有没有 import _shared"）**被那行合法代码 mask 掉了**——
+把真正的委托 import 整行注释掉，守卫照样通过。
+**教训：守卫要盯"语义有没有满足"（委托符号在不在），不是"字符串在不在"；
+而且"我加了一行无关的兜底代码"也可能悄悄废掉一条守卫——所以改完必须跑 `test_guards`。**
 
 **为什么这件事必须脚本化**：这份清单原本是手工 bash——**手工检查的问题不是"查不准"，而是"想不起来查"**。
 
