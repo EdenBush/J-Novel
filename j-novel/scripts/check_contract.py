@@ -67,6 +67,21 @@ KEY_RX = re.compile(
 REQ_IN = ('进入·位置时间', '进入·情绪', '进入·已知', '进入·身体')
 REQ_OUT = ('退出·位置时间', '退出·情绪', '退出·已知', '退出·身体')
 
+# ── 场景字数配额（2026-09-24 新增）────────────────────────────────
+# 为什么查这个：字数占质检脚本调用的 **52%（737 次）**，是最大的一处返工。
+# 而字数在动笔前**完全确定**——「整章 2200 字」对生成模型是一个 2200 字的区间搜索；
+# 拆成「场景1 约500 / 场景2 约500 / 场景3 约500 / 场景4 约700」就变成 4 个小搜索，
+# 且**每个场景写完就能对一次**，不必等整章。
+# ⚠️ 真实项目实测：这条约定**只自发出现在第 1 章**（500+500+500+700=2200，加对了），
+#    第 2–10 章全都没有 —— 所以它此前**既不是模板字段，也没有任何校验**。
+SCENE_HEAD_RX = re.compile(r'(?m)^#{3,5}\s*场景\s*(\d+)')
+QUOTA_LINE_RX = re.compile(r'字数配额\**\s*[:：]\s*约?\s*(\d+)')
+QUOTA_HEAD_RX = re.compile(r'约\s*(\d+)\s*字')
+TARGET_RX = re.compile(r'字数\**\s*[:：]\s*目标\s*(\d+)|字数\**\s*[:：]\s*(\d+)')
+# 配额容差：允许 ±10% 或 ±60 字（取大者）——细纲是估算，不该要求精确到字
+QUOTA_TOL_RATIO = 0.10
+QUOTA_TOL_ABS = 60
+
 
 def find_outline_files(proj: Path):
     """找细纲文件。支持「一章一文件」与「一批文件装多章」两种布局。
@@ -117,8 +132,33 @@ def _norm(s: str) -> str:
     return re.sub(r'[\s，,、。；;：:·*`]', '', s or '')
 
 
+def parse_scene_quotas(seg: str):
+    """抽出一章的「场景字数配额」。返回 (配额列表, 章目标字数 or 0, 场景数)。
+
+    配额取两个来源（优先显式栏位）：
+      ① `- **字数配额**：约 800 字`（推荐写法）
+      ② 场景标题行里的 `（约 500 字）`（真实项目自发形成的写法）
+    """
+    heads = list(SCENE_HEAD_RX.finditer(seg))
+    if not heads:
+        return [], 0, 0
+    quotas = []
+    for i, h in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(seg)
+        block = seg[h.start():end]
+        # ① 显式栏位优先（只看前 12 行，避免把场景正文里的"约 N 字"算进来）
+        m = QUOTA_LINE_RX.search('\n'.join(block.split('\n')[:12]))
+        if not m:
+            # ② 退到场景标题行本身
+            m = QUOTA_HEAD_RX.search(block.split('\n')[0])
+        quotas.append(int(m.group(1)) if m else 0)
+    mt = TARGET_RX.search(seg)
+    target = int(mt.group(1) or mt.group(2)) if mt else 0
+    return quotas, target, len(heads)
+
+
 def collect(proj: Path):
-    """返回 {章号: (来源文件, 契约 dict)}。"""
+    """返回 {章号: (来源文件, 契约 dict, 该章细纲原文)}。"""
     merged = {}
     for f in find_outline_files(proj):
         text = read_text(f)
@@ -126,7 +166,7 @@ def collect(proj: Path):
             c = parse_contract(seg)
             if no in merged and len(merged[no][1]) >= len(c):
                 continue
-            merged[no] = (f, c)
+            merged[no] = (f, c, seg)
     return merged
 
 
@@ -150,7 +190,7 @@ def check(proj: Path, window: int = 0, brief: bool = False) -> int:
 
     missing, partial, mismatch = [], [], []
     for no in nums:
-        _, c = data[no]
+        _, c, _seg = data[no]
         if not c:
             missing.append((no, '整块缺失', []))
             continue
@@ -200,9 +240,48 @@ def check(proj: Path, window: int = 0, brief: bool = False) -> int:
         print('\n  → 状态分叉必须在**派发写手之前**修：此刻还没有正文要改；'
               '写完再发现就要动两章 + 重做缝合。')
 
+    # ── 场景字数配额（2026-09-24 新增）──────────────────────────
+    # 字数占质检脚本调用 52%（737 次），是最大的一处返工；而它在动笔前完全确定。
+    # 整章目标 = 一个大搜索；拆到场景 = N 个小搜索，且每个场景写完就能对一次。
+    quota_bad, quota_missing, quota_sum = [], [], 0
+    for no in nums:
+        _f, _c, seg = data[no]
+        quotas, target, n_scene = parse_scene_quotas(seg)
+        if not n_scene:
+            continue                      # 没写「场景规划」的细纲（如串行任务卡）不判
+        quota_sum += 1
+        if not any(quotas):
+            quota_missing.append((no, n_scene, target))
+            continue
+        got = sum(quotas)
+        tol = max(QUOTA_TOL_ABS, int(target * QUOTA_TOL_RATIO))
+        if target and abs(got - target) > tol:
+            quota_bad.append((no, quotas, got, target, tol))
+        elif 0 in quotas:
+            zero = [i + 1 for i, q in enumerate(quotas) if q == 0]
+            quota_bad.append((no, quotas, got, target, tol, zero))
+
+    if quota_sum:
+        print('\n' + '-' * 60)
+        print('场景字数配额（把「整章一个大搜索」拆成「每场景一个小搜索」）')
+        print('-' * 60)
+        for no, n_scene, target in quota_missing:
+            print(f'  ✗ 第{no}章：有 {n_scene} 个场景，但**一个字数配额都没有**'
+                  f'（章目标 {target or "?"} 字）—— 写手只能整章写完再回头数字数')
+        for item in quota_bad:
+            no, quotas, got, target, tol = item[:5]
+            extra = f'；场景 {item[5]} 缺配额' if len(item) > 5 else ''
+            print(f'  ✗ 第{no}章：场景配额之和 {got} ≠ 章目标 {target}'
+                  f'（差 {got - target:+d}，容差 ±{tol}）｜各场景 {quotas}{extra}')
+        if not quota_missing and not quota_bad:
+            print(f'  ✓ {quota_sum} 章的场景配额都与章目标一致')
+
+    fail += len(quota_missing) + len(quota_bad)
+
     if brief:
         print(f'\n[低费用·窗闸] 契约 {len(nums)} 章｜缺 {len(missing)}｜分叉 {len(mismatch)}'
-              f'｜部分一致 {len(partial)}' + (' → 合格' if not fail else ' → 不合格'))
+              f'｜部分一致 {len(partial)}｜配额问题 {len(quota_missing) + len(quota_bad)}'
+              + (' → 合格' if not fail else ' → 不合格'))
     elif not fail and not partial:
         print(f'\n  ✓ {len(nums)} 章契约齐备，相邻章状态一致')
     return 1 if fail else 0

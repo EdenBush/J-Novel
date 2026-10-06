@@ -26,7 +26,7 @@
 | **动笔写任何一章前** | `guides/writing-mindset.md` + **`guides/concrete-voice.md`** | `guides/chapter-template.md` |
 | **定章末型 / 定开场方式 / 定情绪载体（写细纲时就要做）** | **`guides/narrative-craft.md`**（人类作者的**决策逻辑**：章末四型+实测配比／日常进入型开场／结构级废笔／称呼即关系刻度／异质材料插入／情绪的外部介质／排版即节奏，**每项附真实人类原文**） | `guides/hook-techniques.md`（四型怎么落笔）· `guides/chapter-craft.md`（开场类型判定） |
 | 规划/写作章首引子（仅新起型）与章尾落点、判定开场类型 | `guides/hook-techniques.md`（**章尾四型**：信息结算 30% / 关系余韵 27% / 喜剧反转 23% / 悬念 13%）+ `guides/chapter-craft.md`（「续接优先」+ 日常进入型） | — |
-| 写对话 | `guides/dialogue-writing.md`（含**三之二·称呼即关系刻度**） | — |
+| **写对话 / 对白改稿**（改前改后各用一次） | `guides/dialogue-writing.md`（含**三之二·称呼即关系刻度**、**三之三·三条正向硬指标**、**五之三·短句怎么不冷**） + **`guides/character-voice.md`**（**人物声口**：声口锚点十项／九类角色声口区分／对白清理／**声口压力测试七问**／禁止动作） | 跑 `scripts/check_human_rhythm.py` 看**对话占比**（区间 10–40%；**<10% 阻塞**，10–20% 提示） |
 | **动笔前想"往里加什么"（加法层）** | **`guides/humanize-toolkit.md`**（30 招内容注入：私人细节／情绪体感化／人性灰度／主角必须犯错／句式情绪同步／感官偏见化／信息碎玻璃化／减空洞加颗粒…**每招带改前改后对照**，并附 3 部人类的实测裁决） | 按类型选重点（悬疑/言情/玄幻/都市/通用 五档） |
 | **质检后扫禁用词与模板句式** | **`guides/ai-cliche-blacklist.md`**（分级禁用词／AI 模板句式清洗表／小说专属万能情绪模板／模板道具清单／误伤警告表／**实测驳回表**） | 跑 `scripts/check_aistyle.py`（含新增的**半角引号硬闸门**与万能情绪模板提示） |
 | **从零开始完整流程**（七轮采访 + 圣经 + 正文） | **`reasonix-novel-weaver`** | — |
@@ -51,7 +51,7 @@
 | **主编取「上一章真实结尾」/ 缝合边界** | **`scripts/make_handoff.py`**（从正文裁出**交接卡**：上章真实结尾 ＋ 本章首段/末段 ＋ 指纹）——**主编读卡不读正文**，这是 low 模式最大的一笔省 | `guides/chained-pipeline.md` 第五·二节（主编零正文）· 第六节（缝合 SOP） |
 | **批次放行前（硬性）** | 跑 `scripts/check_batch_gate.py <项目目录>`（**退出码 0 才许继续**；查乱序完成/字数/质检痕迹/台账推进/章节边界） | — |
 | **派发子 Agent 前** | `guides/subagent-brief.md`（任务包标准模板：工具权限/绝对路径/必调子技能/排班/**三态台账条目**/**接口契约**/**世界设定包**/诊断句） | ★ **任务包由编译器产出，不要手工拼**：`scripts/make_task_package.py <项目> --chapter N --write`（脚本能拿到的全自动填）→ `--check --all` 校验（**缺槽位 / 超预算 / 待填残留 → 拒绝开工**）。`guides/chained-pipeline.md` |
-| **控制"每次调用带多重上下文"**（成本第一优先） | `guides/token-efficiency.md` —— 实测**每次调用平均重发 149,675 tokens**（中位），这才是成本大头（不是调用次数） | `make_task_package.py` 的**槽位预算**（总上限 5000 字）· 主编零正文（`make_handoff.py`）· 分层锚（只给该给的那一层） |
+| **控制"每次调用带多重上下文"**（成本第一优先） | `guides/token-efficiency.md` —— 实测**每次调用平均重发 149,675 tokens**（中位），这才是成本大头（不是调用次数） | `make_task_package.py` 的**槽位预算**（总上限 6000 字；**槽位顺序也有意义**——硬约束在前、"该怎么写"的正向素材在后）· 主编零正文（`make_handoff.py`）· 分层锚（只给该给的那一层） |
 | **每章写前（世界切片）** | 圣经 `一、世界观手册`——裁出本章的**场景卡／规则与边界／专有名词表**；并行模式裁 500–800 字**内联进任务包** | `guides/bible-template.md`（密度判据＋反模式）· `guides/subagent-brief.md`（「世界设定包怎么裁」） |
 | **每章收尾（设定回流）** | 把本章新造的专有名词登记回圣经「专有名词表」（含首次出现章号） | 跑 `scripts/check_worldbuilding.py <项目目录>`（设定激活率／未登记新词） |
 | **低费用模式（costMode: low）** | **`guides/low-cost-mode.md`（唯一事实源）**——**批量推进档**：① 组织形式走**链式流水线 + 批次**（不是串行）② 机械质检**全跑脚本** + 判断项**合并成 1 次** ③ **人味项目一个不砍** ④ **第三节**专治流水线接缝（主编零正文／三道闸门／边界冻结／只向前修／领先上限 3） | `guides/quick-reference-card.md`（必读文件降为一页卡）· `guides/chained-pipeline.md`（批量组织） |
@@ -64,6 +64,7 @@
 | **改动本 SKILL 之后 / 发布或冻结版本之前** | 读 `references/skill-mechanics.md` 第五节（维护检查清单 + 判据） | 跑 `python scripts/audit_release.py --regress`（引用完整性/脚本语法/阈值一致性/调用链闭合/结构完整性/残留检查/**跨脚本一致性**/分离回归，**8 项**一次跑完；退出码 0 才算通过）<br>**动了任何检查项后，再跑 `python scripts/test_guards.py`**（故障注入；"加了守卫"≠"守卫有效"，用例数以运行时输出的 n/n 为准） |
 | **作者要改设定／改剧情／改结局（写到一半想动大纲）** | **`guides/change-management.md`**（五步变更流程：登记 → 影响评估 → 分层执行 → 留痕 → 验证；含"变更三深度"帮作者选代价） | `guides/volume-review.md`（卷末复盘产出的 P0 修订计划走同一套流程） |
 | 卷终维护圣经 | `guides/bible-template.md`（状态机） | `guides/creation-ledger.md`（台账对账） |
+| **卷终复盘 / 完稿质量报告 / 资产沉淀** | **`guides/volume-review.md`**（卷末复盘：质量曲线哪里塌了 + P0 修订计划走变更流程）＋ **`guides/quality-scorecard.md`**（8 维评分：平均分 / 最强最弱维度 / 质量曲线）＋ **`guides/asset-vault.md`**（资产沉淀：文风 / 教训 / 灵感 / 作品档案 —— 成为下一部作品的"起跑线数据"） | 跑 `flows/phase5-polish.md` 第 6、7 项 |
 
 ---
 

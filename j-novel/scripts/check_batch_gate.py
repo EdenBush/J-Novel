@@ -204,6 +204,8 @@ def main():
     ledger_path = root / '05-创作台账.md'
     state_path = root / '03-状态台账.md'
     ledger_lag = []
+    ledger_field_missing = []   # ★ L2 字段级校验（2026-10-02 新增）
+    soft_hints = []             # 软提示（不阻塞）
     if completed:
         last = max(completed)
         lt = read_text(ledger_path) if ledger_path.exists() else ''
@@ -219,7 +221,41 @@ def main():
         elif m2 and max(int(x) for x in m2) < last:
             ledger_lag.append(f'03-状态台账最新章号={max(int(x) for x in m2)}，落后于第 {last} 章')
 
-    # ---------------- 5. 章节边界 ----------------
+        # ══ L2 字段级校验（2026-10-02 新增）════════════════════════
+        # **为什么要加这一层**：此前所有校验都停在 L1（"文件在不在"），
+        # 于是出现了一个实证过的漏洞 —— `05-创作台账.md` 里**同一个文件、同一份模板**
+        # 的两个字段命运相反：
+        #   · 「最近重读章号」被本脚本校验 → 真实项目里**有值** ✓
+        #   · 「retryCount」没有任何脚本校验 → 真实项目里**整个字段缺失** ✗
+        # 而 `retryCount` 恰恰是「一次合格率」唯一的数据源（v6.5.0 加它的理由
+        # 就是"此前从未落盘"）—— **生成点+交付点齐备、缺校验点 = 换个地方继续不落盘**。
+        # 判据形态：必须是**字段名 + 值**，不接受只写字段名（否则一个标题也算通过）。
+        _rc = re.search('返工轮次.{0,20}?[:：][ ]*([0-9]+)', lt)
+        if not _rc:
+            ledger_field_missing.append(
+                '05-创作台账 缺 `retryCount`（返工轮次）字段或值 —— 它是「一次合格率」的唯一数据源。'
+                '模板见 guides/creation-ledger.md，格式：`本章返工轮次（retryCount）：0`')
+
+        # 软提示：对话专项列（2026-10-02 随对话体系新增；给存量项目留过渡，不阻塞）
+        _arc = root / '04-质检档案.md'
+        _at = read_text(_arc) if _arc.exists() else ''
+        if _at and '对话' not in _at:
+            soft_hints.append(
+                '04-质检档案 里没有任何「对话」列 —— 2026-10-02 起质检摘要应含「对话专项」'
+                '（占比／废话／混沌／称呼／去标签可辨／间接叙述偷对话）')
+
+        # 软提示：状态台账的三态标记（铁律五）
+        if st and not re.search('[✓?✗×]', st):
+            soft_hints.append(
+                '03-状态台账 里找不到三态标记（✓ 已落正文 / ? 仅规划 / ✗ 已被否定）—— '
+                '铁律五要求全条目带标记，否则下游会把"仅规划"当成已发生的事实来写')
+
+        # 软提示：人物档案的声口卡（2026-10-02 随对话体系新增）
+        _chp = root / '00-人物档案.md'
+        if _chp.exists() and '压力下的反应' not in read_text(_chp):
+            soft_hints.append(
+                '00-人物档案 里没有「压力下的反应方式」（声口卡四栏之一）—— '
+                '它决定了冷面角色会不会被写成"功能性的短句机器人"')    # ---------------- 5. 章节边界 ----------------
     boundary_fail = False
     boundary_note = ''
     continuity_script = Path(__file__).parent / 'check_continuity.py'
@@ -343,6 +379,8 @@ def main():
         blockers.append(f'【质检无记录】04-质检档案.md 里找不到这些章的记录：第 {missing_qc} 章')
     if ledger_lag:
         blockers.append('【台账未推进】' + '；'.join(ledger_lag))
+    if ledger_field_missing:
+        blockers.append('【台账缺字段】' + '；'.join(ledger_field_missing))
     if boundary_fail and not waived:
         blockers.append(
             '【章节边界有悬空钩子】check_continuity.py 退出码 1 —— 逐条复查：'
@@ -370,6 +408,7 @@ def main():
             'completed': completed, 'watermark': watermark,
             'out_of_order': out_of_order, 'wordcount_fail': nopass,
             'missing_qc': missing_qc, 'ledger_lag': ledger_lag,
+            'ledger_field_missing': ledger_field_missing, 'soft_hints': soft_hints,
             'boundary_fail': boundary_fail,
             'boundary_waived': waived, 'boundary_waive_reason': waiver_note,
             'redline1_hit': redline_hit, 'redline1_note': redline_note,
@@ -392,6 +431,10 @@ def main():
         print('     → 移入 chapters/_meta/<章名>.meta.md，正文文件只留 `# 标题 + 章首引子 + 正文`')
     if waived:
         print(f'  [已放行] 章节边界：{waiver_note}')
+    if soft_hints:
+        print('  [字段提示] 以下**不阻塞**，但会慢慢漏（2026-10-02 的字段级体检）：')
+        for _h in soft_hints[:4]:
+            print('     · %s' % _h)
     if redline_note:
         print(f'  [红线1] {redline_note}')
     print()

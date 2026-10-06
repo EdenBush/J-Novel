@@ -53,6 +53,7 @@ PROPAGATION_RULES = [
     ('作者在场·禁止同构',    'narrative-craft.md', r'禁止同构', r'禁止同构'),
     ('作者在场·必须挂钩',    'narrative-craft.md', r'付什么租', r'付什么租'),
     ('对话标签用「道」',      'dialogue-writing.md', r'道', r'用「\*\*道'),
+    ('对话占比·下限',        'dialogue-writing.md', r'下限是硬指标|≥25%', r'对话占比 20–40%|低于 10% 判失败'),
     ('对话标签·上限',        'dialogue-writing.md', r'1/3|2/3|不要每句都挂', r'1/3|2/3|不要每句都挂'),
     ('单句成段·适用对象',    'narrative-craft.md', r'对话.*情绪重音|主要用在', r'一句一段'),
     ('单句成段·禁纯景物连排', 'narrative-craft.md', r'纯景物|空镜蒙太奇', r'纯景物|空镜蒙太奇'),
@@ -113,7 +114,9 @@ THRESHOLDS = [
     ('破折号',    'dash',          ['1.5'],      1.5),
     ('身体部位',  'body',          ['1.0'],      1.0),
     ('动作短语',  'act_density',   ['0.4'],      0.40),
-    ('对话占比',  'dialog',        ['40'],       40.0),
+    # 2026-10-02：对话占比改为**双端硬判**（<10 防退化成旁白 / >40 防注水），
+    # 故本行给第 5 个元素（hi 期望）—— 检查器会同时比对 lo 与 hi。
+    ('对话占比',  'dialog',        ['10', '40'], 10.0, 40.0),
     ('超长句占比', 'long_sent_pct', ['3'],        3.0),
     ('句长p90',   'sent_p90',      ['42'],       42.0),
     ('节奏CV',    'rhythm_cv',     ['0.19'],     0.19),
@@ -250,7 +253,9 @@ def check_thresholds(root: Path):
     script = root / 'scripts' / 'check_human_rhythm.py'
     t = read_text(script)
     drift = []
-    for label, name, doc_tokens, hard in THRESHOLDS:
+    for _row in THRESHOLDS:
+        label, name, doc_tokens, hard = _row[0], _row[1], _row[2], _row[3]
+        hi_exp = _row[4] if len(_row) > 4 else None
         m = re.search(name + r"':\s*dict\(([^)]*)\)", t)
         if not m:
             drift.append(f'{label}：脚本里找不到指标 {name}')
@@ -264,6 +269,13 @@ def check_thresholds(root: Path):
             continue
         if abs(float(hm.group(1)) - hard) > 1e-9:
             drift.append(f'{label}：脚本 hard={hm.group(1)}，体检表期望 {hard}（体检表需更新）')
+        # 双端硬判的指标（如对话占比 10–40）：hi 也必须比对 ——
+        # 否则「上限被悄悄改掉」没人管，而这正是「取消下限」之外的另一半风险。
+        if hi_exp is not None:
+            _hh = re.search(r'hi=([0-9.]+)', m.group(1))
+            if not _hh or abs(float(_hh.group(1)) - hi_exp) > 1e-9:
+                _v = _hh.group(1) if _hh else '无'
+                drift.append(f'{label}：脚本 hi={_v}，体检表期望 {hi_exp}（体检表需更新）')
         # 文档侧：至少一处出现该数字（走缓存，不再每次 rglob+read）
         found = False
         for _f, _t in _all_docs(root, 'refs').items():
@@ -675,7 +687,11 @@ def check_cross_script(root: Path):
     _CORE_GUIDES = ('narrative-craft.md', 'human-quota.md', 'dialogue-writing.md',
                     'human-rhythm.md', 'review-agent.md', 'quick-reference-card.md',
                     # novel-humanize 融合（2026-09-16）：加法层 + 禁用词清单
-                    'humanize-toolkit.md', 'ai-cliche-blacklist.md')
+                    'humanize-toolkit.md', 'ai-cliche-blacklist.md',
+                    # 2026-10-02：人物声口 —— 每章对话都要用它过一遍。
+                    # 加它的理由（审计实测）：它是 45 本 guides 里**唯一一本只有索引层读点**的
+                    # （L1=0 L2=0 L3=1）—— 而索引层是"想起才查"，不是"到点必做"。
+                    'character-voice.md')
     _sk = read_text(root / 'SKILL.md')
 
     # 清单 A：SKILL.md「每章最小必做清单」
@@ -994,6 +1010,209 @@ def check_cross_script(root: Path):
 
     if _pipebad:
         issues.append('低消耗流水线口径不一致：\n      · ' + '\n      · '.join(_pipebad))
+
+    # ── ⑥ 任务包「槽位必产出」+ 前移机制齐备（2026-09-24 新增）────────────
+    # 这一组盯的是同一个病灶的第 N 次复现：**文档里写了、脚本里声明了，
+    # 但生成点不产出、校验点也看不见**（接口契约、成本配额卡、声音预置三行都栽在这上面）。
+    _mtp = read_text(root / 'scripts' / 'make_task_package.py')
+    _mtp_code = _code_only(_mtp)
+    _prebad = []
+    # (a) 不许再用"空则静默跳过"——它让可选槽位**永远不出现在包里**
+    if re.search(r'if\s+not\s+body\s+and\s+not\s+req\s*:', _mtp_code):
+        _prebad.append('`render()` 又出现了「空且非必填 → 跳过」——'
+                       '实测这会让 3 个槽位**永远不产出**（author_shot/lesions/diagnosis），'
+                       '而 `--check` 只在 required 时报错 → 静默通过。'
+                       '正确做法：**所有槽位一律产出**，不适用就写「（不适用——本任务无此项）」。')
+    # (b) 五个"前移机制"槽位必须存在且必填
+    for _k, _why in (('author_shot', '作者画面（"最保人味的素材"，判据=后期修显著贵于前期）'),
+                     ('lesions', '已知病灶（不传递 → 同类缺陷逐章复发）'),
+                     ('rhythm_base', '节律基线（占返工 26%，按"给事实不给目标"给）'),
+                     ('quota_card', '成本配额卡（治字数+节律+词汇 ≈91% 的返工）'),
+                     ('voice_preset', '写前声音预置三行（人味的根；文档要求"没写=写前分析未完成"）')):
+        if not re.search(r"\('%s'.*?,\s*True," % _k, _mtp_code, re.S):
+            _prebad.append(f'槽位 `{_k}` 缺失或不是必填 —— {_why}')
+    # (c) 细纲必须给这两个前移项一个**栏位**（否则"写进细纲"无处可写）
+    for _f, _k, _why in (
+        ('references/guides/outline-template.md', '场景字数配额必填',
+         '场景配额（占返工 52% 的字数的前移手段）'),
+        ('references/guides/outline-template.md', '写前声音预置三行必填', '声音预置三行'),
+        ('references/flows/phase2-planning.md', '场景字数配额必填', '场景配额（细纲规格）'),
+        ('references/flows/phase2-planning.md', '写前声音预置（三行 · 必填）', '声音预置（细纲规格）'),
+    ):
+        if _k not in read_text(root / _f):
+            _prebad.append(f'`{_f}` 里没有「{_k}」—— {_why} 在细纲层**没有栏位**，'
+                           f'"写进细纲"就没有落点')
+    # (d) 校验点必须真的查配额
+    _cc = _code_only(read_text(root / 'scripts' / 'check_contract.py'))
+    if 'parse_scene_quotas' not in _cc or 'QUOTA_TOL_RATIO' not in _cc:
+        _prebad.append('`check_contract.py` 不再校验场景字数配额 '
+                       '（配额缺失 / 求和不符 → 应退出 1）')
+    # (e) 配额卡只能有**一个权威载体**（双载体同名必漂——伏笔表踩过同一个坑）
+    _qr = read_text(root / 'references' / 'guides' / 'quick-reference-card.md')
+    if '## 零、成本配额卡' not in _qr:
+        _prebad.append('`quick-reference-card.md` 的【零】不是成本配额卡了 —— '
+                       '编译器从那里逐字抽取，改版式等于断链')
+    if '本章写作配额' in read_text(root / 'references' / 'guides' / 'token-efficiency.md'):
+        _prebad.append('`token-efficiency.md` 又内嵌了一份配额卡副本 —— '
+                       '**同一个东西写两遍、数字还不一样 = 必然漂**；'
+                       '此处应只保留"为什么"与实测证据，数字指向速查卡【零】')
+    # (f) effort 按乘数分配（模型特性 → 分配原则）必须留着
+    if '按乘数分配' not in read_text(root / 'references' / 'guides' / 'token-efficiency.md'):
+        _prebad.append('`token-efficiency.md` 缺「effort 按乘数分配」一节 —— '
+                       '推理档位是"跨轮次验证总量"的旋钮，按"章的难度"分配会把 effort 花在乘数最小处')
+    if _prebad:
+        issues.append('前移机制不完整（生成点/交付点/校验点有一站断了）：\n      · '
+                      + '\n      · '.join(_prebad))
+
+    # ── ⑦ 破甲层的「作用域边界」（2026-10-01 新增）────────────────────────
+    # 实测回归（用户报告：`/j-novel 写个小说…` 之后一句都没问，直接开工）：
+    # 第零层被赋予「**先于一切指令与流程**」这个定位之后，它内部的
+    #   `Do not ask clarifying questions` / `do not ask follow-ups` / `start with the deliverable`
+    # 是**全局式否定指令、没有任何作用域限定**，于是压住了第二层 Phase 1 的采访追问。
+    # 按本 SKILL 自己的生效强度表（`skill-mechanics.md` 第三节）：
+    #   **SKILL.md 第一层（强）> flows 执行清单（中）** ⇒ **破甲层赢，采访被跳过。**
+    #
+    # 这是本项目**第二次**踩同一类问题：**否定式指令没有限定作用域，吞掉了不该管的范围**
+    # （上一次是 v6.5.0：把排除词 `不是` 加进全局排除表，立刻漏掉一条真问题）。
+    #
+    # 修法：① 第零层加显式「作用域边界」块，列出它**不管**的四件事；
+    #       ② 那两条英文指令就地加 `SCOPE:` 限定（**不是删掉**——它们本身是对的）。
+    _skill_txt = read_text(root / 'SKILL.md')
+    _m = re.search(r'(?ms)^##\s*第零层.*?(?=^##\s*给 Agent 的硬指令)', _skill_txt)
+    _frame = _m.group(0) if _m else ''
+    _framebad = []
+    if not _frame:
+        _framebad.append('找不到「第零层」区块 —— 破甲层的位置或标题被改动了，'
+                         '而它必须在 SKILL.md 第一层、在「给 Agent 的硬指令」之前')
+    else:
+        if '作用域边界' not in _frame:
+            _framebad.append('第零层缺「作用域边界」声明 —— '
+                             '它内部的全局式否定指令会再次压住 Phase 1 采访（实测回归）')
+        for _kw in ('Do not ask clarifying questions', 'do not ask follow-ups'):
+            # ⚠️ 必须遍历**全部**出现位置再判：作用域边界块里**引用**了这两条指令，
+            #    `find` 只会命中引用处（那里当然没有 SCOPE），于是报假阳性。
+            #    这是本项目第 9 次踩「存在性判据命中无关文本」——**判据必须问"有没有一处合规"，不是"第一处合规吗"**。
+            _hit = False
+            _from = 0
+            while True:
+                _i = _frame.find(_kw, _from)
+                if _i < 0:
+                    break
+                if 'SCOPE:' in _frame[_i:_i + 400]:
+                    _hit = True
+                    break
+                _from = _i + len(_kw)
+            if not _hit and _kw in _frame:
+                _framebad.append(f'第零层的 `{_kw}` 没有 `SCOPE:` 限定 —— '
+                                 f'它会被读成全局禁令，从而禁止 Phase 1 的追问')
+        if 'Phase 1' not in _frame:
+            _framebad.append('第零层没有点名「Phase 1 采访必须问」—— '
+                             '破甲层要显式让路给流程规定的确认点')
+    if _framebad:
+        issues.append('破甲层作用域边界缺失（它会静默压掉采访）：\n      · '
+                      + '\n      · '.join(_framebad))
+
+    # ── ⑧ 流程性「不问」指令的作用域（2026-10-01 新增）──────────────────
+    # 与 ⑦ 同一类问题的**另外两处**：措辞是全局式的，但实际只管某个阶段。
+    # 三处叠加起来，Agent 就有了三个各自都成立的"不问"理由 —— 这是采访消失的完整解释：
+    #   ① 破甲层：`Do not ask clarifying questions` / `do not ask follow-ups`
+    #   ② Phase 3 顶部：「其余一律不问」「**这就是全部**」
+    #   ③ plot-scaffold 的「作者意图浓度=弱 → 只在真缺方向时问」
+    #      （新立项的第一次输入恰好就是"浓度弱"的典型形态：给了类型和名字，其余"你看着办"）
+    _scope_bad = []
+    _ps = read_text(root / 'references' / 'guides' / 'plot-scaffold.md')
+    if '本节的适用边界' not in _ps:
+        _scope_bad.append('`plot-scaffold.md` 第五节缺「适用边界」声明 —— '
+                          '「作者意图浓度」会被拿到 Phase 1 上用，导致"新立项也不采访"')
+    # ⚠️ 判据必须用**唯一标记**：初版写 `if '新立项' not in _ps` 太宽 ——
+    #    "新立项"在适用边界表里也出现，于是删掉那条规则守卫仍不响（用例 64 报"没抓到"）。
+    #    又一条"存在性判据太宽 = 验不到东西"（本项目已第 10 次踩这一类）。
+    if '新立项**没有**浓度' not in _ps:
+        _scope_bad.append('`plot-scaffold.md` 缺「**新立项没有浓度**」这条规则 —— '
+                          '作者第一次只给几句话时，会被读成"浓度弱 → 不问"')
+    _p3 = read_text(root / 'references' / 'flows' / 'phase3-writing.md')
+    if '「其余一律不问」的作用域' not in _p3:
+        _scope_bad.append('`phase3-writing.md` 顶部的「其余一律不问」没有作用域声明 —— '
+                          '它是写作期纪律，管不到 Phase 1')
+    if '这两句的作用域只在 Phase 3' not in read_text(root / 'SKILL.md'):
+        _scope_bad.append('`SKILL.md` 的 Phase 3 描述没有声明「不问」的作用域 —— '
+                          '第一层的全局式措辞会被读成全流程约束')
+    if _scope_bad:
+        issues.append('流程性「不问」指令的作用域缺失（三处叠加会静默吞掉采访）：\n      · '
+                      + '\n      · '.join(_scope_bad))
+
+    # ── ⑨ 对话体系完整性（2026-10-02 新增）──────────────────────────────
+    #    来历：实测某项目 10 章 —— 对话占比中位 17.3%、6/10 章低于人类下限、
+    #    主角台词中位 6 字，而**体系里没有任何一处会因此报警**。
+    #    四条各自成立的规则叠加（每句必须有目的 / 简洁能省则省 / 取消下限 / 档案写"短"），
+    #    合力把对白压成功能性短句。这一组把「对话不能再整体塌掉」钉住。
+    _dlg_bad = []
+    _dlg_g = read_text(root / 'references' / 'guides' / 'dialogue-writing.md')
+    _p3_g = read_text(root / 'references' / 'flows' / 'phase3-writing.md')
+    _ct_g = read_text(root / 'references' / 'guides' / 'character-template.md')
+    _rh_sc = read_text(root / 'scripts' / 'check_human_rhythm.py')
+
+    # ① 核心原则不得回退成"每句必须有目的"（它否定废话/混沌配额）
+    if re.search(r'(?m)^1\. \*\*每句对话必须有目的', _dlg_g):
+        _dlg_bad.append('`dialogue-writing.md` 核心原则①回退成了「**每句**对话必须有目的」——'
+                        '它直接否定 `human-quota.md` 的「废话对话 ≥1/章」「对话混沌 ≥1/章」，'
+                        '是把主角写成功能机器人的头号原因')
+    # ② 来源的三条正向硬指标必须在（融合时曾整块缺失）
+    for _kw, _why in (
+        ('角色嗓音差异化', '来源技法14 的核心；缺了就是"所有人一个调"'),
+        ('间接叙述还原为直接对话', '缺了就会用叙述偷掉对话（"两人争执了几句"）'),
+        ('对话带冲突', '来源原话「别写成礼貌问答」'),
+    ):
+        if _kw not in _dlg_g:
+            _dlg_bad.append(f'`dialogue-writing.md` 缺来源正向硬指标「{_kw}」—— {_why}')
+    # ③ 声口卡（含"压力下的反应方式"这一关键栏）必须在
+    for _kw, _why in (('声口卡', '每个有名字的角色都要有声口卡'),
+                      ('压力下的反应方式', '★ 冷面角色不变成功能机器人的关键——'
+                                          '只定义"短"、不定义"短之外他还有什么"，就必然写成机器人')):
+        if _kw not in _ct_g:
+            _dlg_bad.append(f'`character-template.md` 缺「{_kw}」—— {_why}')
+    # ④ 对话占比下限不得再被取消
+    if '对话占比 20–40%' not in _p3_g:
+        _dlg_bad.append('`phase3-writing.md` 的对话占比**下限**不见了 —— '
+                        '2026-10-02 已实测：取消下限会让 6/10 章低于人类下限而无人报警')
+    if '对话占比 ≤40%（护栏，取消原' in _p3_g:
+        _dlg_bad.append('`phase3-writing.md` 又出现了「取消原下限」的旧口径')
+    # ⑤ 质检档案必须有对话列（否则规则在，留痕不在）
+    if '对话专项（2026-10-02 新增' not in _p3_g:
+        _dlg_bad.append('`phase3-writing.md` 的质检摘要缺「对话专项」列 —— '
+                        '对话是最容易整体塌掉又最不容易被单个脚本抓到的一块，必须进档案')
+    # ⑥ 脚本判据必须是 range + 软下限（不能退回"只有上限"）
+    if "'dialog':       dict(kind='max'" in _rh_sc:
+        _dlg_bad.append('`check_human_rhythm.py` 的 dialog 退回成了 kind=max（只有上限）——'
+                        '于是"对话 0%"会被判合格')
+    if 'soft_lo' not in _rh_sc:
+        _dlg_bad.append('`check_human_rhythm.py` 缺 `soft_lo` —— range 无法表达「<10% 硬、'
+                        '10–20% 只提示」这种两档下限')
+
+    if _dlg_bad:
+        issues.append('对话体系被削弱（会把主角写回功能性短句）：\n      · '
+                      + '\n      · '.join(_dlg_bad))
+
+    # ── ⑩ 字段级校验（L2）存在（2026-10-02 新增）──────────────────────
+    #    来历：审计发现全套校验都停在 L1（**文件在不在**），于是出现了一个实证漏洞 ——
+    #    `05-创作台账.md` 里**同一个文件、同一份模板**的两个字段命运相反：
+    #      「最近重读章号」被 check_batch_gate 校验 → 真实项目里**有值** ✓
+    #      「retryCount」无任何脚本校验 → 真实项目里**整个字段缺失** ✗
+    #    （而 retryCount 是「一次合格率」唯一的数据源——v6.5.0 加它的理由就是"从未落盘"。）
+    #    这一组保证 L2 校验不被删掉。
+    _l2_bad = []
+    _gate = read_text(root / 'scripts' / 'check_batch_gate.py')
+    if 'ledger_field_missing' not in _gate:
+        _l2_bad.append('`check_batch_gate.py` 缺 `ledger_field_missing` —— '
+                       'retryCount 的字段级校验没了，它会再次静默丢失（已实测过一次）')
+    if '返工轮次' not in _gate:
+        _l2_bad.append('`check_batch_gate.py` 不再校验「返工轮次」字段')
+    _p3f = read_text(root / 'references' / 'flows' / 'phase3-writing.md')
+    if '07-剧情脚手架.md' not in _p3f:
+        _l2_bad.append('`phase3-writing.md` 缺 `07-剧情脚手架.md` 的读点 —— '
+                       '串行模式下作者给的画面会写了没人用（此前只有并行模式的脚本读它）')
+    if _l2_bad:
+        issues.append('字段级校验被削弱：' + chr(10) + '      · ' + (chr(10) + '      · ').join(_l2_bad))
 
     # ⑤ **模块级的全局副作用必须幂等**（2026-09-23 新增）
     #    实测：12 个脚本各自在模块级写 `sys.stdout = io.TextIOWrapper(sys.stdout.buffer, ...)`，

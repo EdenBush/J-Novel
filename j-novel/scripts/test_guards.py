@@ -300,7 +300,7 @@ def main():
         {'chapterNumber': n, 'status': ('completed' if n == 1 else 'pending'),
          'wordCountPass': True} for n in range(1, 11)]}, ensure_ascii=False), encoding='utf-8')
     (_td2 / '04-质检档案.md').write_text('### 第1章\n', encoding='utf-8')
-    (_td2 / '05-创作台账.md').write_text('最近重读章号：第1章\n', encoding='utf-8')
+    (_td2 / '05-创作台账.md').write_text('最近重读章号：第1章\n本章返工轮次（retryCount）：0\n', encoding='utf-8')
     (_td2 / '03-状态台账.md').write_text('第1章\n', encoding='utf-8')
     (_td2 / '01-大纲.md').write_text(
         '| 章节 | 标题 | 开场类型 | 章末型 |\n|---|---|---|---|\n| 第1章 | A | 新起 | 甲·信息结算 |\n',
@@ -359,7 +359,7 @@ def main():
             'chapters': [{'chapterNumber': n, 'status': 'completed', 'wordCountPass': True}
                          for n in (1, 2)]}, ensure_ascii=False), encoding='utf-8')
         (base / '05-创作台账.md').write_text(
-            '# 创作台账\n\n最近重读章号：第2章\n' + ledger, encoding='utf-8')
+            '# 创作台账\n\n最近重读章号：第2章\n本章返工轮次（retryCount）：0\n' + ledger, encoding='utf-8')
         return base
 
     _tmp = Path(tempfile.gettempdir())
@@ -730,6 +730,138 @@ def main():
     results.append(inject_case('指标不分层', 'references/execution-contract.md',
                                lambda s: s.replace('修法①：指标分层', 'QQQ'),
                                _STATIONS))
+
+    print('56. **槽位改回「空则静默跳过」必须报警**')
+    print('   （实测：这个写法让 author_shot / lesions / diagnosis 三个槽位**永远不出现在包里**，')
+    print('     而校验器只在 required 时报错 → 静默通过。生成物里它们出现 0 次。）')
+    results.append(inject_case(
+        '槽位静默跳过', 'scripts/make_task_package.py',
+        lambda s: s.replace(
+            '        parts.append(SLOT_OPEN.format(key=key, budget=budget, req=int(req)))',
+            '        if not body and not req:\n            continue\n'
+            '        parts.append(SLOT_OPEN.format(key=key, budget=budget, req=int(req)))', 1),
+        '前移机制不完整'))
+
+    print('57. **细纲模板丢「场景字数配额」栏位必须报警**')
+    print('   （占返工 52% 的字数，其前移手段就是在细纲把配额拆到场景；')
+    print('     没有栏位 = "写进细纲"无处可写）')
+    results.append(inject_case('配额无栏位', 'references/guides/outline-template.md',
+                               lambda s: s.replace('场景字数配额必填', 'QQQ'),
+                               '前移机制不完整'))
+
+    print('58. **配额卡重新内嵌一份副本必须报警**（双载体同名必漂）')
+    print('   （实测：token-efficiency 里的副本已经漂成「≥2–3 处」「明喻 ≤1.2」，')
+    print('     而权威版是「≥5 处」「≤1.3」——同一个东西写两遍、数字还不一样。）')
+    results.append(inject_case('配额卡双载体', 'references/guides/token-efficiency.md',
+                               lambda s: s + '\n```\n本章写作配额【一、必须补足的】\n```\n',
+                               '前移机制不完整'))
+
+    print('59. **effort 按乘数分配被删必须报警**')
+    print('   （effort 是"跨轮次验证总量"的旋钮；按"章的难度"分配会把 effort 花在乘数最小处。）')
+    results.append(inject_case('缺 effort 分配', 'references/guides/token-efficiency.md',
+                               lambda s: s.replace('按乘数分配', 'QQQ'),
+                               '前移机制不完整'))
+
+    print('60. **场景字数配额校验被拆掉必须报警**')
+    print('   （校验点一断，配额就变回"文档里的一句话"，而不是"编译不过"。）')
+    results.append(inject_case('配额不校验', 'scripts/check_contract.py',
+                               lambda s: s.replace('QUOTA_TOL_RATIO', 'QQQ'),
+                               '前移机制不完整'))
+
+    print('61. **破甲层删掉「作用域边界」必须报警**')
+    print('   （实测回归：用户 `/j-novel 写个小说…` 之后 Agent 一句都没问，直接开工。')
+    print('     根因是第零层被赋予「先于一切指令与流程」的定位后，它内部的全局式否定指令')
+    print('     `Do not ask clarifying questions` / `do not ask follow-ups` 压住了第二层')
+    print('     Phase 1 的采访追问——按生效强度表 第一层「强」> flows 清单「中」，破甲层赢。）')
+    results.append(inject_case('破甲层无边界', 'SKILL.md',
+                               lambda s: s.replace('作用域边界（2026-10-01 补', 'QQQ'),
+                               '破甲层作用域边界缺失'))
+
+    print('62. **英文指令去掉 `SCOPE:` 限定必须报警**')
+    print('   （它们本身是对的指令，缺的只是作用域——所以修法是"限定"，不是"删掉"。）')
+    results.append(inject_case('缺 SCOPE 限定', 'SKILL.md',
+                               lambda s: s.replace('SCOPE: content/material details only',
+                                                   'QQQ'),
+                               '破甲层作用域边界缺失'))
+
+    print('63. **「作者意图浓度」删掉适用边界必须报警**')
+    print('   （浓度挂在 P3 之下，但措辞是全局的：「不是每个作者都想被问」「介入频次按浓度定」。')
+    print('     拿到 Phase 1 上用 → 新立项也不采访。）')
+    results.append(inject_case('浓度越界', 'references/guides/plot-scaffold.md',
+                               lambda s: s.replace('本节的适用边界', 'QQQ'),
+                               '流程性「不问」'))
+
+    print('64. **「新立项没有浓度」这条规则删掉必须报警**')
+    print('   （新立项的第一次输入恰好就是"浓度弱"的典型形态：给了类型和名字，其余"你看着办"。')
+    print('     没有这条规则，Agent 就会把"还没开始"读成"他没想法"。）')
+    results.append(inject_case('新立项误判', 'references/guides/plot-scaffold.md',
+                               lambda s: s.replace('新立项**没有**浓度', 'QQQ'),
+                               '流程性「不问」'))
+
+    print('65. **Phase 3「其余一律不问」去掉作用域必须报警**')
+    print('   （它是写作期纪律，但「这就是全部」这半句听起来像全流程约束。')
+    print('     实测：Agent 读成"全书只允许两次开口"，连采访都跳过。）')
+    results.append(inject_case('不问越界', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('「其余一律不问」的作用域', 'QQQ'),
+                               '流程性「不问」'))
+
+    print('66. **对话下限被再次取消必须报警**')
+    print('   （2026-10-02 实测：取消下限 ⇒ 某项目 6/10 章低于人类下限、第 9/10 章仅 5.6%/3.3%，')
+    print('     而当时的体系里没有任何一处会因此报警。）')
+    results.append(inject_case('取消对话下限', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('对话占比 20–40%', '对话占比 ≤40%'),
+                               '对话体系被削弱'))
+
+    print('67. **核心原则回退「每句对话必须有目的」必须报警**')
+    print('   （它直接否定 human-quota 的废话对话/对话混沌配额——')
+    print('     是把主角写成功能性机器人的头号原因。）')
+    results.append(inject_case('每句必须有目的', 'references/guides/dialogue-writing.md',
+                               lambda s: s.replace('1. **对话整体必须有目的',
+                                                   '1. **每句对话必须有目的**：推进情节\n'
+                                                   '2. **对话整体必须有目的'),
+                               '对话体系被削弱'))
+
+    print('68. **声口卡关键栏被删必须报警**')
+    print('   （「压力下的反应方式」是冷面角色不变成功能机器人的关键——')
+    print('     只定义"短"、不定义"短之外他还有什么"，就必然写成机器人。）')
+    results.append(inject_case('声口卡缺关键栏', 'references/guides/character-template.md',
+                               lambda s: s.replace('压力下的反应方式', 'QQQ'),
+                               '对话体系被削弱'))
+
+    print('69. **质检档案的对话列被删必须报警**')
+    print('   （规则在、留痕不在 = 等于不存在。对话是最容易整体塌掉、')
+    print('     又最不容易被单个脚本抓到的一块。）')
+    results.append(inject_case('对话无留痕', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('对话专项（2026-10-02 新增', 'QQQ'),
+                               '对话体系被削弱'))
+
+    print('70. **对话判据退回「只有上限」必须报警**')
+    print('   （kind=max 时"对话占比 0%"会被判合格——这正是塌掉的方式。）')
+    results.append(inject_case('对话只留上限', 'scripts/check_human_rhythm.py',
+                               lambda s: s.replace("'dialog':       dict(kind='range'",
+                                                   "'dialog':       dict(kind='max'"),
+                               '对话体系被削弱'))
+
+    print('71. **来源的「角色嗓音差异化」被删必须报警**')
+    print('   （融合时这条整块没进来过；它是"所有人一个调"的唯一解药。）')
+    results.append(inject_case('声口指标缺失', 'references/guides/dialogue-writing.md',
+                               lambda s: s.replace('角色嗓音差异化', 'QQQ'),
+                               '对话体系被削弱'))
+
+    print('72. **retryCount 的字段级校验被删必须报警**')
+    print('   （实测铁证：05-创作台账 里同一文件、同一模板的两个字段命运相反 ——')
+    print('     「最近重读章号」有校验→有值；「retryCount」无校验→整个字段缺失。')
+    print('     而它是「一次合格率」唯一的数据源。）')
+    results.append(inject_case('缺字段级校验', 'scripts/check_batch_gate.py',
+                               lambda s: s.replace('ledger_field_missing', 'QQQ'),
+                               '字段级校验被削弱'))
+
+    print('73. **07-剧情脚手架的串行读点被删必须报警**')
+    print('   （此前只有并行模式的 make_task_package 读它 →')
+    print('     串行模式（单会话写作）下作者给的画面写了没人用。）')
+    results.append(inject_case('脚手架无读点', 'references/flows/phase3-writing.md',
+                               lambda s: s.replace('07-剧情脚手架.md', 'QQQ.md'),
+                               '字段级校验被削弱'))
 
     for _d in (_p18, _p19, _p21):
         try:
