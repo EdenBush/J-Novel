@@ -17,6 +17,8 @@
 | **Phase 2 生成大纲/细纲时**（若存在 `07-剧情脚手架.md`）—— **P2 落点** | `07-剧情脚手架.md`——**逐条找落点或标「未采用（原因）」；脚手架优先于自由发挥** | `guides/plot-scaffold.md` 第四节 |
 | **Phase 3 写作期：缺剧情方向／作者想调整走向／正文偏离了条目**—— **P3 续航** ★ | **`guides/plot-scaffold.md` 第五节**（意图浓度判据／四条触发点／**方向对齐四步**／建议质量要求／Phase 3 例外边界） | `07-剧情脚手架.md`（浓度 + 对齐记录 + 条目来源） |
 | **Phase 4/5 验收：脚手架对账** | `guides/plot-scaffold.md` 第六节（状态推进／已偏离开原因／作者原创没被静默改掉） | `07-剧情脚手架.md` 对账表 |
+| ★ **每批细纲展开之前 · 想跟作者一起磨剧情**（v7.1.0 新增）—— **剧情共创** | **`guides/plot-co-creation.md`**（AI 先出草案 → 每章 **3 个钩子候选、每个必带代价** → 作者选／改／否／"你看着办"四者同权 → 记进卡；**磨完才展开细纲**；档位见第五节） | **`细纲/剧情卡-第NN-NN章.md`**（必填：本章钩子／要说清的事／回不去的事件／章末读者该冒出的问题／作者原话）；**缺卡或缺字段 = `check_batch_gate.py` 硬拦** |
+| **选"这一章的钩子是哪件事"**（内容层） | **`guides/plot-co-creation.md` 第四节** —— 内容是卡里**已选定**的那个候选，**不许临场自造** | **`guides/hook-techniques.md`**（形式层：章末四型／章首引子／张力怎么落笔）—— **先定内容，再定型** |
 | 采访收尾（生成标题） | `guides/title-guide.md` | — |
 | 规划章节结构（超长篇 2000+ 章） | `guides/plot-structures.md` + **`guides/volume-arc-planning.md`**（卷/弧/市场验证/锁死留白） | `guides/outline-template.md` |
 | 写人物档案 | `guides/character-template.md` | `guides/character-building.md` |
@@ -28,16 +30,19 @@
 | 规划/写作章首引子（仅新起型）与章尾落点、判定开场类型 | `guides/hook-techniques.md`（**章尾四型**：信息结算 30% / 关系余韵 27% / 喜剧反转 23% / 悬念 13%）+ `guides/chapter-craft.md`（「续接优先」+ 日常进入型） | — |
 | **写对话 / 对白改稿**（改前改后各用一次） | `guides/dialogue-writing.md`（含**三之二·称呼即关系刻度**、**三之三·三条正向硬指标**、**五之三·短句怎么不冷**） + **`guides/character-voice.md`**（**人物声口**：声口锚点十项／九类角色声口区分／对白清理／**声口压力测试七问**／禁止动作） | 跑 `scripts/check_human_rhythm.py` 看**对话占比**（区间 10–40%；**<10% 阻塞**，10–20% 提示） |
 | **动笔前想"往里加什么"（加法层）** | **`guides/humanize-toolkit.md`**（30 招内容注入：私人细节／情绪体感化／人性灰度／主角必须犯错／句式情绪同步／感官偏见化／信息碎玻璃化／减空洞加颗粒…**每招带改前改后对照**，并附 3 部人类的实测裁决） | 按类型选重点（悬疑/言情/玄幻/都市/通用 五档） |
+| ★ **动笔前定「实物清单」（2026-10-07 新增）** | **`guides/specificity-gate.md` 第二节** —— **3–8 项"只属于这一章"的实物**，写进 `chapters/_meta/<章名>.meta.md` 的 `## 实物清单` 段（判据：搬到别章还成立 → 通用件，重写） | 编译器把它抽进任务包 `concrete_list` 槽位；**缺段 = `check_batch_gate.py` 硬拦**。写完看 `check_contract.py` 的**实物覆盖率**（清单承诺 vs 正文兑现；⚠️ 无人类基线，**刻意为提示、不阻塞**——脚本判不了"清单本身好不好"） |
 | **质检后扫禁用词与模板句式** | **`guides/ai-cliche-blacklist.md`**（分级禁用词／AI 模板句式清洗表／小说专属万能情绪模板／模板道具清单／误伤警告表／**实测驳回表**） | 跑 `scripts/check_aistyle.py`（含新增的**半角引号硬闸门**与万能情绪模板提示） |
 | **从零开始完整流程**（七轮采访 + 圣经 + 正文） | **`reasonix-novel-weaver`** | — |
 | **高效出稿**（质量可接受、追求速度） | **`reasonix-novel-weaver-lite`** | — |
-| **章节质检后（脚本已全绿）** | **`guides/review-agent.md`**（独立质检子代理：同构／删除／作者在场／用力过猛 四项测试） | — |
+| **章节质检后（脚本已全绿）** | **`guides/review-agent.md`**（独立质检子代理：同构／删除／作者在场／用力过猛／**可替换性** **五项测试**） | **`guides/specificity-gate.md` 第三节**（可替换性四问：换名／换书／删句／复述） |
 | **每章质检** | `guides/ai-taste-selfcheck.md` + `guides/hard-style-check.md` + `guides/continuity-check.md` + `guides/human-quota.md` + **`guides/human-rhythm.md`** | 运行 `scripts/check_repetition.py`（重复）+ `scripts/check_aistyle.py`（词汇层指纹）+ **`scripts/check_human_rhythm.py`（句法层节律，退出码 1 = 不合格）** |
 | **质检后给读数定档** | `guides/confidence-binding.md` | — |
 | **读数「晃」/ 重试换路** | `guides/confidence-binding.md` | — |
 | **节律/词汇检测超标后修改** | **`guides/rewrite-playbook.md`**（脚本报哪项超就翻哪节，按招改） | `guides/human-rhythm.md`（规则原理解释） |
 | **"读着还是 AI 味"（表层指标已达标）** | **`guides/post-polish.md`**（后精修 4 工序：长句缝合/定指替换/长对话补足/节奏起伏）——治**深度分布指标**（超长句占比/p90/节奏CV/中文量词/长对话/数字） | `guides/concrete-voice.md`（具体性原理） |
 | AI 味重需清洗 / 修改前的指令措辞 | `guides/deai-workflow.md` + **`guides/occupancy-rewrite.md`** | — |
+| ★ **改写 / 修改（脚本报了超标项，要动手改）**（v7.2.0 新增） | **`guides/rewrite-units.md`** —— **先选单元与边界**：U1 句级·插入／U2 句级·替换／U3 句级·换物／U4 对话段·重写／**U5 段落级·重写／U6 段群·重写**（后两个是体系此前缺的**「重写档」**）；**先粗后细：U5/U6 → U3 → U1/U2/U4**；**U5/U6 带强边界**——保功能／事件／信息／接口，**单段／连续 2–4 段、不许一次重写整章**。**改前出「修改方案表」（治指标耦合）→ 改后做「改前改后三行对照」（治看不见效果）** | **`guides/rewrite-playbook.md`**（**句级招式**：脚本报哪项翻哪节 + A/B 两套顺序） |
+| ★ **批末 · 本书最佳段落库**（v7.2.0 新增，每批一次） | **`guides/rewrite-units.md`**（**按缺陷类型调取样例**——报"缺闲笔"就调 `缺闲笔` 那一类；与「三层锚」分工：三层锚＝文风代表段／本库＝**手术样例**） | **`flows/phase3-writing.md`** 批末动作（清单 `7.7`／SKILL 动作 `10.8`） |
 | **生成细纲 / 章节任务卡 / 派发子代理任务包**（这些本质都是"对 LLM 的写作指令"） | **`guides/prompt-engineering.md`**（5 原则，防止指令本身诱导 AI 味——你写"补充细节"它就用破折号补刀，你写"写具体"它就写"一个人"） | — |
 | **改 SKILL 规则 / 写任何新的写作指令前** | **`guides/prompt-engineering.md`** | — |
 | 字数不足需扩充 | `guides/chapter-craft.md`（扩充技巧） | — |
@@ -47,6 +52,7 @@
 | **批次边界 / 每章写后（流水线闸门）** | **`guides/low-cost-mode.md` 第三节**（三道闸门：章闸每章·窗闸每章滚动 3 章·批闸每批；判据「**发现缺陷的时点 ≤ 缺陷被定稿的时点**」） | **窗闸**：`check_repetition.py --all <项目> --window 3 --brief --imagery`<br>**声音漂移（三层锚）**：`check_aistyle.py --all <项目> --drift --brief --window 3 --base <批锚> --vol-base <卷锚> --book-base <全书锚>`（★ 只给批锚时**累积漂移在定义上不可见**）<br>**边界冻结**：`make_handoff.py <项目> --check --window 3` |
 | **写前（并行/链式必做）· 契约自检** | **`flows/phase2-planning.md` 细纲规格的「接口契约（冻结 · 机器可读）」** —— 契约是并行写作的**接口定义**：第 N+1 章写手看不到第 N 章正文，只能靠它。「进入·X」必须等于上一章「退出·X」 | 跑 `scripts/check_contract.py <项目目录>`（**退出码 1 = 先修契约再派发**；此刻还没有正文要改，是最便宜的修复点） |
 | **批末（每批一次）· 锚点滚动** | `guides/parallel-workflow.md` 第六节 —— 从**本批已定稿章**抽 1–2 段最代表文风的原文，更新**下一批细纲**的「文风锚点示例」。**三层锚**：全书锚（第 1 章，**永不滚动**）／卷锚（每卷第 1 章）／批锚（本批首章，滚动） | 跑 `check_repetition.py --all --imagery`（意象配额）+ `check_contract.py <项目>`（契约齐备兜底） |
+| ★ **批末 · 项目级人味体检**（2026-10-07 新增） | **`guides/rewrite-playbook.md`**（开头「两类信号」表 + A/B 两套顺序）—— 体检给出「系统性偏低/偏高」后，**照 A 或 B 的顺序改** | 跑 `scripts/check_human_rhythm.py <项目>/chapters --all --project`（**一次看完整本**：命中率曲线 + 系统性偏低/偏高 + 结论「欠写 vs 配额拉满」）。⚠️ **逐章跑看不出系统性偏差** —— 实测某项目 15/15 章「数字密度偏低」、15/15 章「现实锚定偏低」，逐章看时只是每章一行不起眼的 ✗ |
 | **意象配额（防长篇自我复制）** | `guides/bible-template.md` 四·五「意象使用记录」——**同一意象每卷 ≤4 次，且至少有一次"该出现时缺席"** | 跑 `check_repetition.py --all <项目> --imagery`（0 token；单字意象会明确标注"无法计数、未检查"，不静默通过） |
 | **主编取「上一章真实结尾」/ 缝合边界** | **`scripts/make_handoff.py`**（从正文裁出**交接卡**：上章真实结尾 ＋ 本章首段/末段 ＋ 指纹）——**主编读卡不读正文**，这是 low 模式最大的一笔省 | `guides/chained-pipeline.md` 第五·二节（主编零正文）· 第六节（缝合 SOP） |
 | **批次放行前（硬性）** | 跑 `scripts/check_batch_gate.py <项目目录>`（**退出码 0 才许继续**；查乱序完成/字数/质检痕迹/台账推进/章节边界） | — |

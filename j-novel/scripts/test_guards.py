@@ -68,7 +68,10 @@ def run_audit():
 
 
 def backup_scripts():
-    """把待注入文件的原文读进内存。"""
+    """把待注入文件的原文读进内存，并**落盘一份全量快照**（SIGPIPE 自愈用）。
+
+    内存 `_ORIG` = 进程内 finally 还原；磁盘快照 = 进程被 SIGPIPE 杀掉后的启动自愈。
+    """
     _ORIG.clear()
     for f in sorted((SKILL / 'scripts').glob('*.py')):
         if f.name == Path(__file__).name:      # 不备份自己（防递归）
@@ -78,12 +81,120 @@ def backup_scripts():
         f = SKILL / rel
         if f.exists():
             _ORIG[f] = f.read_text(encoding='utf-8')
+    _write_snapshot()
+
+
+def _write_snapshot():
+    """把快照范围（宁多勿漏）的原文**落盘一次**，供下次启动 self_heal 恢复。
+
+    ⚠️ 只在**启动**时写一次、整跑确认全绿时删一次（见 89 行注释：一次跑 1 写 1 删，
+    避免"每用例一写一删"触发宿主环境的批量删除保护）。
+    """
+    snap = {}
+    for f in _snapshot_targets():
+        try:
+            snap[f.relative_to(SKILL).as_posix()] = f.read_text(encoding='utf-8')
+        except Exception:
+            continue
+    try:
+        _JOURNAL.write_text(json.dumps(snap, ensure_ascii=False), encoding='utf-8')
+    except Exception as e:
+        print(f'  ⚠ 快照落盘失败（{e!r}）—— 本跑若被 SIGPIPE 中断将无法自愈')
 
 
 def restore_scripts():
     """从内存还原（幂等：可重复调用）。"""
     for f, txt in _ORIG.items():
         f.write_text(txt, encoding='utf-8')
+
+
+# ── 落盘快照 + 启动自愈（2026-10-09 v7.2.0 新增）──────────────────────────
+# ★ 为什么需要它（一次真实事故，是我自己造成的）：
+#   本脚本的还原是**进程内的**（每个用例在 `finally` 里写回原文）。
+#   一旦 stdout 被 `head` / `tail` / `grep -q` **提前关闭管道**，进程收到 **SIGPIPE 直接死掉**，
+#   还原代码**根本不会执行** → 库里留下一个被注入的文件（本次是 `plot-scaffold.md` 的一个小标题
+#   被替换成哨兵串 `QQQ`）→ **之后每次 audit 都报同一处错，而人还以为技能被改坏了**。
+#
+#   **修法不是"记得别接管道"（那是靠自觉），而是把还原从"靠进程活着"变成"机制保证"。**
+#
+# ★ 为什么是**整跑一次全量快照**，而不是"每个用例登记/销账"（第一版就是这么写的，已推翻）：
+#   每用例一写一删 = 一次跑动几百次文件写删 → 触发宿主环境的**批量删除保护**
+#   （实测：`SAFE_DELETE_BULK_CONFIRM_REQUIRED count=50/threshold=50`）→ 脚本被中途掐死，
+#   于是"为了防中断而加的机制，自己成了新的中断源"。
+#   现在的形态：**启动时写一次全量快照，全程不再动盘，整跑确认全绿时删一次** —— 一次跑 1 写 1 删。
+#
+#   快照覆盖 = 用例可能注入的**全部范围**（`SKILL.md` / `references/**/*.md` / `scripts/*.py`）。
+#   文件名 `.test_guards_journal.json` 不是 `.md`/`.py`，因此不会被任何守卫的 glob 扫到。
+_JOURNAL = Path(__file__).resolve().parent / '.test_guards_journal.json'
+
+
+def _snapshot_targets():
+    """快照范围 = 用例可能注入的全部文件（**宁多勿漏**：多快照一个只是多读一次盘）。"""
+    out = [f for f in sorted(SKILL.glob('scripts/*.py')) if f.name != Path(__file__).name]
+    out += sorted(SKILL.glob('references/**/*.md'))
+    top = SKILL / 'SKILL.md'
+    if top.is_file():
+        out.append(top)
+    return [f for f in out if f.is_file()]
+
+
+
+def _journal_load() -> dict:
+    if not _JOURNAL.is_file():
+        return {}
+    try:
+        d = json.loads(_JOURNAL.read_text(encoding='utf-8'))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _journal_clear():
+    """整跑确认全绿后清空快照 —— 树干净了，快照就没意义了（也免得它常驻误导下一跑）。"""
+    try:
+        _JOURNAL.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def self_heal() -> tuple:
+    """★ 启动自愈：把库恢复到上一跑开始前的样子。返回 (恢复数, 跳过数)。
+
+    ⚠️ 必须在**任何注入之前**、**基线检查之前**调用 —— 否则上一次的残留会被当成真缺陷，
+    于是"基线本来就不绿"，整个测试直接拒跑（这次事故的表象正是这个）。
+
+    ⚠️ **代价要说清**：它会**覆盖**这些文件。若你在一跑被中断之后、又手工改过其中某个文件，
+    那个改动**会被回滚**。所以：① 中断后**先重跑一次本脚本**（自愈），**再**动手改东西；
+    ② 自愈会逐个打印被还原的文件名 —— **看着那份名单再决定要不要重做你的改动**。
+    （无 git 可用，所以只能靠"打印 + 顺序约定"把风险降到可见，不能假装它不存在。）
+    """
+    d = _journal_load()
+    if not d:
+        return (0, 0)
+    n, skipped = 0, 0
+    for rel, orig in d.items():
+        if not isinstance(orig, str):
+            # 旧格式（rel -> {orig, inj}，v7.2.0 开发中途的残留）——无法可靠判定，跳过交人。
+            skipped += 1
+            print(f'  ⚠ 自愈跳过（旧格式快照条目，无法判定）：{rel} —— 建议手工确认该文件')
+            continue
+        f = SKILL / rel
+        try:
+            if not f.is_file():
+                skipped += 1
+                print(f'  ⚠ 自愈跳过（快照里有、库里无此文件）：{rel}')
+                continue
+            cur = f.read_text(encoding='utf-8')
+            if cur == orig:
+                continue                    # 没被动过 → 不算恢复，也不吭声（绝大多数是这种）
+            f.write_text(orig, encoding='utf-8')
+            n += 1
+            print(f'  ↻ 自愈还原：{rel}')
+        except Exception as e:
+            skipped += 1
+            print(f'  ⚠ 自愈失败：{rel} —— {e!r}（请手工检查该文件）')
+    _journal_clear()
+    return (n, skipped)
 
 
 def inject_case(name, fname, mutate, expect_kw):
@@ -130,10 +241,79 @@ def doc_inject_case(name, expect_kw):
     return hit
 
 
+def _region_replace(text, start_rx, end_rx, old, new, count=0):
+    """只把 `text` 里**指定区段内**的 `old` 换成 `new`，区段外一个字不动。
+
+    用途：**阶段级守卫**（`STAGE_CORE`）的注入必须只动那一个区段 —— 否则注入的
+    就不是"这一阶段少了读点"这个故障，用例也就不成立。
+
+    ⚠️ `count=0` 表示区段内**全部**替换。这条默认值是踩出来的：
+    本项目已 **4 次**因"只替换第一处"而**注入落空**（CHANGELOG v4.5 / v4.7 / v6.0 / v6.5）——
+    守卫看起来"没抓到"，其实是**注入没到位**。
+    **注入前先数一遍目标词在区段里出现了几次。**
+    """
+    m = re.search(start_rx, text)
+    if not m:
+        return text
+    rest = text[m.end():]
+    me = re.search(end_rx, rest)
+    if not me:
+        return text
+    seg = rest[:me.start()]
+    new_seg = seg.replace(old, new) if count == 0 else seg.replace(old, new, count)
+    if new_seg == seg:
+        return text
+    return text[:m.end()] + new_seg + rest[me.start():]
+
+
+def _plot_card_text(nums, status='已与作者确认（2026-10-09）', style='pad2',
+                    hook=True, must=True):
+    """剧情卡 fixture —— 字段名与 `guides/plot-co-creation.md` 3.3 **逐字一致**。
+
+    `style` 用来验证闸门的**多写法兼容**（同一含义的多种写法都要认）：
+        'plain' → `## 第 1 章` ／ 'pad2' → `## 第 02 章` ／ 'pad3' → `## 第001章`
+    """
+    _fmt = {'plain': lambda n: str(n),
+            'pad2': lambda n: '%02d' % n,
+            'pad3': lambda n: '%03d' % n}[style]
+    head = (f'# 剧情卡 · 第 {_fmt(nums[0])}–{_fmt(nums[-1])} 章\n\n'
+            f'> 共创状态：{status}｜档位：推荐档\n'
+            f'> 作者改动：无｜未回应项：无\n\n---\n\n')
+    body = ''
+    for n in nums:
+        body += f'## 第 {_fmt(n)} 章：测试章（约 3000 字 · 冲突章）\n\n'
+        if hook:
+            body += ('- **本章钩子**（已选定）：他当着满屋子人承认炉子是借的\n'
+                     '  - 候选 A：<…> ｜ 代价：<…>\n')
+        if must:
+            body += '- **要说清的事**：① 借来的那台炉子来路不明\n'
+        body += ('- **回不去的事件**（没有就写「无」）：无\n'
+                 '- **章末读者该冒出的问题**：炉子是谁的？\n'
+                 '- **作者原话 / 改动**（有就原样记，没有写「无」）：无\n\n')
+    return head + body
+
+
+def write_plot_card(base, nums, name=None, **kw):
+    """把剧情卡落到 `细纲/剧情卡-第NN-NN章.md`（接口契约路径）并返回该路径。"""
+    d = base / '细纲'
+    d.mkdir(parents=True, exist_ok=True)
+    name = name or ('剧情卡-第%02d-%02d章.md' % (nums[0], nums[-1]))
+    p = d / name
+    p.write_text(_plot_card_text(nums, **kw), encoding='utf-8')
+    return p
+
+
 def main():
     print('=' * 74)
     print('守卫故障注入测试（每个用例都会在跑完后自动还原）')
     print('=' * 74)
+    # ★ 0. 启动自愈：回放上一跑留下的快照（若上一跑被 SIGPIPE 杀掉，还原没执行）
+    #    必须排在 **backup_scripts() 与基线检查之前** —— 否则残留会被当成真缺陷。
+    _healed, _skipped = self_heal()
+    if _healed or _skipped:
+        print(f'  ⚠ 上一跑被中断留下快照：自愈还原 {_healed} 个文件'
+              f'（跳过 {_skipped} 个：文件缺失或恢复失败，请手工检查）')
+        print('     成因通常是 stdout 被 head/tail 提前关闭管道 → SIGPIPE 杀掉进程，还原没执行\n')
     backup_scripts()
 
     base = run_audit()
@@ -305,6 +485,17 @@ def main():
     (_td2 / '01-大纲.md').write_text(
         '| 章节 | 标题 | 开场类型 | 章末型 |\n|---|---|---|---|\n| 第1章 | A | 新起 | 甲·信息结算 |\n',
         encoding='utf-8')
+    # ★ 2026-10-07 v7.0.0：本章已 completed，就必须有 `_meta/` 实物清单
+    #   （否则 `concrete_list_missing` 会阻塞 → 这个用例会因为别的原因失败）。
+    (_td2 / 'chapters' / '_meta').mkdir(parents=True, exist_ok=True)
+    (_td2 / 'chapters' / '_meta' / '第01章-测试.meta.md').write_text(
+        '# 第01章 元数据\n\n## 本章概要\n- 核心事件：fixture\n\n'
+        '## 实物清单（本章 3–8 项：只属于这一章的东西）\n'
+        '- 半包受潮的火柴\n- 302 路末班车\n- 补了两次的蓝布书包\n',
+        encoding='utf-8')
+    # ★ 2026-10-09 v7.1.0：本批已 completed 的章还必须有 `细纲/剧情卡-*.md`
+    #   （否则 `plot_card_missing` 会阻塞 → 本用例会因为别的原因失败）。
+    write_plot_card(_td2, [1])
     _rg = subprocess.run([PY, '-X', 'utf8', str(SKILL / 'scripts' / 'check_batch_gate.py'), str(_td2)],
                          cwd=str(SKILL), capture_output=True, text=True, encoding='utf-8', errors='replace')
     _og = _rg.stdout or ''
@@ -347,11 +538,27 @@ def main():
         # 第 2 章：开头 700 字内**不提** 陆铮（触发边界硬命中）
         (base / 'chapters' / '第02章-测试.md').write_text(
             '# 第02章 测试\n\n' + filler[:700] + '\n\n' + filler + '\n', encoding='utf-8')
-        if meta_dir:
-            (base / 'chapters' / '_meta').mkdir(exist_ok=True)
-            (base / 'chapters' / '_meta' / '第01章-测试.meta.md').write_text(
-                '# 元数据\n\n## 本章概要\n这一行不该被任何脚本当成正文。' + filler + '\n',
-                encoding='utf-8')
+        # ★ 2026-10-07 v7.0.0：`_meta/` 现在是**必填**（实物清单的落盘位置）——
+        #   `check_batch_gate.py` 的 `concrete_list_missing` 会查本批次已写完的章。
+        #   ⚠️ 这正是 v6.8.0 加 `retryCount` 时踩过的同一个坑：**加一个新的必填字段，
+        #      会让所有旧 fixture 失效**（当时它直接把用例 ⑰ 打挂）。所以在这里统一补齐，
+        #      而不是等用例炸了再逐个补。
+        (base / 'chapters' / '_meta').mkdir(exist_ok=True)
+        for _n in (1, 2):
+            _meta = (f'# 第0{_n}章 元数据\n\n## 本章概要\n- 核心事件：fixture\n\n'
+                     f'## 实物清单（本章 3–8 项：只属于这一章的东西）\n'
+                     f'- 半包受潮的火柴\n- 302 路末班车\n- 补了两次的蓝布书包\n')
+            if meta_dir and _n == 1:
+                # 这一段是给用例 ㉒ 用的：`_meta/` 里的东西**不该被任何脚本当成正文**
+                _meta += '\n## 章节备注\n' + filler + '\n'
+            (base / 'chapters' / '_meta' / f'第0{_n}章-测试.meta.md').write_text(
+                _meta, encoding='utf-8')
+        # ★ 2026-10-09 v7.1.0：`细纲/剧情卡-*.md` 也是**必填**（剧情共创的产出物）——
+        #   `check_batch_gate.py` 的 `plot_card_missing` 会查本批次已写完的章。
+        #   ⚠️ 这是"加一个新必填字段 → 所有旧 fixture 失效"的**第三次**
+        #      （v6.8.0 的 retryCount、v7.0.0 的实物清单）。**统一在这里补齐，
+        #      不是等用例炸了逐个补，更不是放宽判据。**
+        write_plot_card(base, [1, 2])
         (base / '00-人物档案.md').write_text(
             '# 人物档案\n\n## 陆铮（主角）· 28 岁 · 男\n性格：沉默。\n', encoding='utf-8')
         (base / '02-写作计划.json').write_text(json.dumps({
@@ -434,7 +641,14 @@ def main():
         m = re.search(r'本阶段执行清单(.*?)\n```', s, re.S)
         if not m:
             return s
-        return s.replace(m.group(1), m.group(1).replace('humanize-toolkit.md', 'QQQ.md', 1), 1)
+        # ★ 2026-10-09 修（**本项目第 5 次「注入落空」**）：**必须在整个区段内替换全部出现**。
+        #   前四次：⑥（`_all_docs` 两处调用）、⑬（清单里两处）、㉜（两条例外/两个例外）、
+        #   v6.5.0（清单措辞被改 → 锚点整个匹配不上）。见 CHANGELOG v4.5/v4.7/v6.0/v6.5。
+        #   本次成因：另一位同事给清单第 5 项（改写阶段）补读点时，**又在这个区段里加了
+        #   一处 `humanize-toolkit.md`**（「动笔前」那处还在）→ "只删一处"不再构成
+        #   "这一步没有读点" → 注入成了空操作 → 断言失败。
+        #   **规律（第 5 次被验证）：注入前先数一遍目标词在目标区段里出现了几次。**
+        return s.replace(m.group(1), m.group(1).replace('humanize-toolkit.md', 'QQQ.md'), 1)
     results.append(inject_case('两套清单读点不同步', 'references/flows/phase3-writing.md',
                                _desync_clists, '不同步'))
 
@@ -863,7 +1077,474 @@ def main():
                                lambda s: s.replace('07-剧情脚手架.md', 'QQQ.md'),
                                '字段级校验被削弱'))
 
-    for _d in (_p18, _p19, _p21):
+    print('74. **改了主流程忘同步支线（口径漂移）必须报警**')
+    print('   （v6.7.0 把对话占比从「≤40%，无下限」改成「20–40%；<10% 硬失败」，')
+    print('     改了 phase3 却漏了 4 个下游文件——其中 subagent-brief.md 是子代理任务包的')
+    print('     唯一事实源，且与同一文件上方的配额卡自相矛盾。）')
+    results.append(inject_case('口径漂移', 'references/guides/chapter-template.md',
+                               lambda s: s.replace('对话占比 **20–40%**', '对话占比 ≤40%（无下限）')
+                                          .replace('低于 10% 判失败', ''),
+                               '口径一致性被破坏'))
+
+    print('75. **生成点丢掉新口径锚点必须报警**')
+    print('   （细纲的「句法目标表」会被复制进每一批细纲——旧口径漏到那里就是全批漏。）')
+    results.append(inject_case('细纲口径缺失', 'references/flows/phase2-planning.md',
+                               lambda s: s.replace('| 对话占比 | X% | **20–40%（场景章 ≥25%；<10% 判失败）** |',
+                                                   '| 对话占比 | X% | ≤40% |'),
+                               '口径一致性被破坏'))
+
+    print('76. **「先补足、再压住」的顺序被削弱必须报警**')
+    print('   （用户反馈"文笔还是很 AI"的机制根因：配额几乎全是"压住"（≤），')
+    print('     再叠加 CTQ 把这些项降为"不阻塞" → 永久不被修 → 删掉的没补回来 = 干净但空洞。）')
+    results.append(inject_case('补足清单被删', 'scripts/check_human_rhythm.py',
+                               lambda s: s.replace('_FIX_HINT', 'QQQ'),
+                               '「先补足、再压住」的整改顺序被削弱'))
+
+    print('77. **速查卡丢掉「补足」必须报警**')
+    print('   （★ 子代理**只读速查卡**——这一处缺了，写手永远只学到"把超标的降下来"。）')
+    results.append(inject_case('速查卡无补足', 'references/guides/quick-reference-card.md',
+                               lambda s: s.replace('先补足', 'QQQ'),
+                               '「先补足、再压住」的整改顺序被削弱'))
+
+    # ══════════════════════════════════════════════════════════════════
+    # 78 / 79：v7.0.0「具体性闸门」的**校验点**（本体层）
+    #   背景：17 项硬指标 + 成本配额卡全是**频率指标**（多长/多密/多少次），
+    #   而"这一章里的东西是不是只属于这本书"这一层此前**只有说明文字**——
+    #   没有生成点、没有交付点、没有校验点。v7.0.0 补成三站齐备，这两个用例守校验点：
+    #     78 = 有牙齿的那一半（批次闸门硬拦：清单没定 / 不够 3 项）
+    #     79 = 只提示的那一半（实物覆盖率：承诺 4 项、正文兑现 1 项）
+    # ══════════════════════════════════════════════════════════════════
+
+    def _mk_concrete_proj(base, with_list, plot='pad2'):
+        """造一个「除实物清单/剧情卡外**其余全绿**」的项目。
+
+        ⚠️ 其余必须全绿：否则闸门失败的原因可能是别的判据，用例就成了
+        "我以为抓到了实物清单，其实抓到的是别的东西"。（所以 78 里有一组 control。）
+
+        `plot` 控制剧情卡 fixture（v7.1.0 新增）：
+            None     → 不产出卡（注入：卡缺失）
+            'pad2'/'plain'/'pad3' → 按该章号写法产出合规卡
+            'nohook' → 产出卡但删掉 `**本章钩子**` 字段（注入：字段缺失）
+        """
+        try:
+            _shx.rmtree(base)
+        except Exception:
+            pass
+        (base / 'chapters' / '_meta').mkdir(parents=True, exist_ok=True)
+        (base / 'chapters' / '第01章-测试.md').write_text(
+            '# 第01章 测试\n\n'
+            + '风从巷口灌进来，晾在绳上的衣服翻了个面，水滴落在青石板上。' * 60 + '\n',
+            encoding='utf-8')
+        _meta = '# 第01章 元数据\n\n## 本章概要\n- 核心事件：fixture\n'
+        if with_list:
+            _meta += ('\n## 实物清单（本章 3–8 项：只属于这一章的东西）\n'
+                      '- 半包受潮的火柴\n- 302 路末班车\n- 补了两次的蓝布书包\n')
+        (base / 'chapters' / '_meta' / '第01章-测试.meta.md').write_text(
+            _meta, encoding='utf-8')
+        # ★ 2026-10-09 v7.1.0：剧情卡（与实物清单同层的 L2 必填项）
+        if plot:
+            write_plot_card(base, [1], style=('pad2' if plot in ('pad2', 'nohook') else plot),
+                            hook=(plot != 'nohook'))
+        (base / '02-写作计划.json').write_text(json.dumps({
+            'costMode': 'standard', 'wordsPerChapter': 2000,
+            'chapters': [{'chapterNumber': 1, 'status': 'completed', 'wordCountPass': True}],
+        }, ensure_ascii=False), encoding='utf-8')
+        (base / '04-质检档案.md').write_text('### 第1章\n', encoding='utf-8')
+        (base / '05-创作台账.md').write_text(
+            '最近重读章号：第1章\n本章返工轮次（retryCount）：0\n', encoding='utf-8')
+        (base / '03-状态台账.md').write_text('第1章 ✓\n', encoding='utf-8')
+        (base / '01-大纲.md').write_text(
+            '| 章节 | 标题 | 开场类型 | 章末型 |\n|---|---|---|---|\n'
+            '| 第1章 | A | 新起 | 甲·信息结算 |\n', encoding='utf-8')
+        return base
+
+    print('78. **实物清单缺失 → 批次闸门拦下**（清单没定 = 本章没有只属于它的东西）')
+    print('   （v7.0.0 之前"没定清单"和"定了清单"过闸门的结果完全一样 ——')
+    print('     17 项频率指标全绿也看不出这个洞。生成点/交付点都有了，校验点此前是空的。）')
+    _p78 = _mk_concrete_proj(_tmp / '_guard_concrete_gate', True)
+    _r78a = subprocess.run([PY, '-X', 'utf8', str(SKILL / 'scripts' / 'check_batch_gate.py'),
+                            str(_p78)],
+                           cwd=str(SKILL), capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
+    _p78b = _mk_concrete_proj(_tmp / '_guard_concrete_gate_bad', False)
+    _r78b = subprocess.run([PY, '-X', 'utf8', str(SKILL / 'scripts' / 'check_batch_gate.py'),
+                            str(_p78b)],
+                           cwd=str(SKILL), capture_output=True, text=True,
+                           encoding='utf-8', errors='replace')
+    _o78b = (_r78b.stdout or '') + (_r78b.stderr or '')
+    print(f'       control（有清单）exit={_r78a.returncode}（应 0）｜'
+          f'injected（无清单）exit={_r78b.returncode}（应 1）')
+    # ⚠️ 断言用**阻塞项标记** `【实物清单缺失】`，不用 "实物清单" 这种也会出现在
+    #    "补法提示"里的词 —— 本项目已有两次"断言命中无关文本"造成的假通过。
+    #    （规律：存在性判据要问"**有没有一处合规**"，而不是"某段文本出现过没有"。）
+    _ok78 = ((_r78a.returncode == 0) and (_r78b.returncode == 1)
+             and ('【实物清单缺失】' in _o78b))
+    print(f'  {"✓" if _ok78 else "✗"} 实物清单闸门  →  '
+          f'{"抓到（control 过 / injected 拦）" if _ok78 else "**没抓到！**"}')
+    if not _ok78:
+        print('       injected 输出尾部：', _o78b[-300:].replace('\n', ' / ')[:200])
+    results.append(_ok78)
+
+    print('79. **实物覆盖率提示生效**（清单 4 项、正文只兑现 1 项 → 覆盖率 + 未兑现条目）')
+    print('   （这一层**只提示不阻塞**：没有人类基线，且脚本判断不了"清单本身好不好"。'
+          '所以它既不能挡住合格稿，也必须真的把"承诺了没写"念出来。）')
+    _p79 = _tmp / '_guard_concrete_coverage'
+    try:
+        _shx.rmtree(_p79)
+    except Exception:
+        pass
+    (_p79 / '细纲').mkdir(parents=True, exist_ok=True)
+    (_p79 / 'chapters' / '_meta').mkdir(parents=True, exist_ok=True)
+    (_p79 / '细纲' / '第01章细纲.md').write_text(
+        '# 第01章 测试\n\n'
+        '- 进入·位置时间: 巷口\n- 进入·情绪: 平静\n- 进入·已知: 无\n- 进入·身体: 无\n'
+        '- 退出·位置时间: 屋里\n- 退出·情绪: 平静\n- 退出·已知: 无\n- 退出·身体: 无\n',
+        encoding='utf-8')
+    _hit_item = '半包受潮的火柴'
+    _miss_items = ['302 路末班车', '补了两次的蓝布书包', '灶台上那道灰痕']
+    (_p79 / 'chapters' / '第01章-测试.md').write_text(
+        '# 第01章 测试\n\n他摸出那半包受潮的火柴，划了三下，第四下才着。\n'
+        + '风从巷口灌进来，晾在绳上的衣服翻了个面。' * 60 + '\n', encoding='utf-8')
+    (_p79 / 'chapters' / '_meta' / '第01章-测试.meta.md').write_text(
+        '# 第01章 元数据\n\n## 本章概要\n- 核心事件：fixture\n\n'
+        '## 实物清单（本章 3–8 项：只属于这一章的东西）\n'
+        '- ' + _hit_item + '\n' + ''.join('- ' + _x + '\n' for _x in _miss_items),
+        encoding='utf-8')
+    _r79 = subprocess.run([PY, '-X', 'utf8', str(SKILL / 'scripts' / 'check_contract.py'),
+                           str(_p79)],
+                          cwd=str(SKILL), capture_output=True, text=True,
+                          encoding='utf-8', errors='replace')
+    _o79 = _r79.stdout or ''
+    _cl = [_l.strip() for _l in _o79.split('\n')]
+    # ⚠️ 判据 = "**有没有一处**合规的行"，不是"某段文本出现过"：
+    #    覆盖率行必须**整行**对上（章号 + 清单 4 项 + 兑现 1 项 + 25%），
+    #    未兑现行必须同时含 3 个未兑现项、且**不含**已兑现的那一项。
+    _row79 = [_l for _l in _cl if _l.startswith('第1章') and '清单 4 项' in _l
+              and '兑现 1 项' in _l and '25%' in _l]
+    _mis79 = [_l for _l in _cl if _l.startswith('未兑现')
+              and all(_x in _l for _x in _miss_items) and _hit_item not in _l]
+    _ok79 = (_r79.returncode == 0) and bool(_row79) and bool(_mis79)
+    print(f'  {"✓" if _ok79 else "✗"} 覆盖率与未兑现清单  →  '
+          f'{"抓到" if _ok79 else "**没抓到！**"}'
+          f'（exit={_r79.returncode}，应 0 = 不阻塞）')
+    if not _ok79:
+        for _l in _cl[-14:]:
+            print('       ', _l[:110])
+    results.append(_ok79)
+
+    # ══════════════════════════════════════════════════════════════════
+    # 80 / 81：v7.1.0「剧情共创」的**校验点**（剧情层）
+    #   背景：剧情（"第 N 章发生什么、这一章的钩子是哪件事"）此前**唯一的入口**
+    #   是剧情脚手架，而它被标成【可选】→ 实测 29 本有 AI 大纲的项目里只有 2 本
+    #   产出过（≈ 7%）→ 默认路径变成"AI 按通用节奏推导 + 让作者确认"。
+    #   本轮把流程改成"每批细纲展开**之前**先出剧情卡 → 磨 → 再展开"，这两个用例守校验点：
+    #     80 = 卡缺失 / 字段缺失 → 批次闸门硬拦（有牙齿的那一半）
+    #     81 = **"作者未回应"必须仍然放行**（防未来有人把判据加严的护栏）
+    #   ⚠️ 判据**只查两件"动作"**：卡有没有产出、问过没。
+    #      **绝不查"作者改了几处"** —— 不可校验，且会把主 Agent 逼成"逼作者改东西过检"。
+    # ══════════════════════════════════════════════════════════════════
+
+    def _run_gate(base):
+        _r = subprocess.run([PY, '-X', 'utf8', str(SKILL / 'scripts' / 'check_batch_gate.py'),
+                             str(base)],
+                            cwd=str(SKILL), capture_output=True, text=True,
+                            encoding='utf-8', errors='replace')
+        return _r.returncode, (_r.stdout or '') + (_r.stderr or '')
+
+    print('80. **剧情卡缺失 / 字段缺失 → 批次闸门拦下**（不出卡 = 细纲只剩 AI 推的通用节奏）')
+    print('   （v7.1.0 之前"出了卡"和"没出卡"过闸门的结果完全一样 ——')
+    print('     控制/注入对照三连：control 用不补零写法 `## 第 1 章` 证明多写法兼容；')
+    print('     注入 B 用 `## 第001章` 且删掉钩子字段 —— 报"缺字段"而非"没有卡"，')
+    print('     正好反证三种章号写法都被解析器认了。）')
+    _p80 = _mk_concrete_proj(_tmp / '_guard_plotcard_gate', True, plot='plain')
+    _rc80, _o80 = _run_gate(_p80)
+    _p80b = _mk_concrete_proj(_tmp / '_guard_plotcard_none', True, plot=None)
+    _rb80, _ob80 = _run_gate(_p80b)
+    _p80c = _mk_concrete_proj(_tmp / '_guard_plotcard_nofield', True, plot=None)
+    # 注入 B：卡存在（`第001章` 写法）但删掉 `**本章钩子**` 字段
+    write_plot_card(_p80c, [1], style='pad3', hook=False)
+    _rc80c, _oc80 = _run_gate(_p80c)
+    print(f'       control（有卡·`第 1 章`）exit={_rc80}（应 0）｜'
+          f'注入A（无卡）exit={_rb80}（应 1）｜注入B（有卡缺钩子·`第001章`）exit={_rc80c}（应 1）')
+    # ⚠️ 断言用**阻塞项标记** `【剧情卡缺失】`，不用 "剧情卡" 这种也会出现在
+    #    "补法提示"与"作者未回应"说明里的词 —— 本项目已有两次"断言命中无关文本"的假通过。
+    #    规律：存在性判据要问"**有没有一处合规**"，而不是"某段文本出现过没有"。
+    _ok80 = (_rc80 == 0 and _rb80 == 1 and _rc80c == 1
+             and ('【剧情卡缺失】' in _ob80) and ('【剧情卡缺失】' in _oc80)
+             # 注入 B 报的是"缺字段"而不是"没有卡" → 证明 `第001章` 被认出来了
+             and ('缺 `**本章钩子**`' in _oc80))
+    print(f'  {"✓" if _ok80 else "✗"} 剧情卡闸门  →  '
+          f'{"抓到（control 过 / 两种注入都拦）" if _ok80 else "**没抓到！**"}')
+    if not _ok80:
+        print('       注入B 输出尾部：', _oc80[-300:].replace('\n', ' / ')[:220])
+    results.append(_ok80)
+
+    print('81. **「作者未回应」必须仍然放行**（本轮的护栏用例：防判据被后人加严）')
+    print('   （理由：**"作者没回"是设计内的合法结果** —— 问了、给了选项、记了录就算过，')
+    print('     节流档/推荐档的不问批次用"一次性告知"，同样只记一行。')
+    print('     如果它被拦下，主 Agent 就会去逼作者改东西以过检 = **表演式修改**，')
+    print('     那比没磨更糟：它污染了"哪些是作者的品味"这条唯一的对账基准。）')
+    _p81 = _mk_concrete_proj(_tmp / '_guard_plotcard_noresp', True, plot='pad2')
+    _r81a, _o81a = _run_gate(_p81)
+    _card81 = _p81 / '细纲' / '剧情卡-第01-01章.md'
+    _card81.write_text(
+        _card81.read_text(encoding='utf-8').replace(
+            '共创状态：已与作者确认（2026-10-09）', '共创状态：作者未回应（2026-10-09）'),
+        encoding='utf-8')
+    _r81b, _o81b = _run_gate(_p81)
+    _ok81 = (_r81a == 0 and _r81b == 0
+             and '【剧情卡缺失】' not in _o81b and '【剧情卡缺失】' not in _o81a)
+    print(f'       control（已与作者确认）exit={_r81a}（应 0）｜'
+          f'注入（作者未回应）exit={_r81b}（**应 0 —— 拦住就是护栏坏了**）')
+    print(f'  {"✓" if _ok81 else "✗"} 未回应仍放行  →  '
+          f'{"放行（不会被逼着表演式修改）" if _ok81 else "**被拦下了！这条判据太严**"}')
+    if not _ok81:
+        print('       输出尾部：', _o81b[-300:].replace('\n', ' / ')[:220])
+    results.append(_ok81)
+
+    print('82. **细纲目录里的"非细纲产物"不得抢走 `outlines[0]`**（v7.1.1 修的真实回归）')
+    print('   （判据是**排序**，不是"名字好记"：`细纲/` 里现在会放剧情卡、文风锚点，')
+    print("     而 '剧' U+5267 / '文' U+6587 **都小于** '第' U+7B2C →")
+    print('     sorted() 之后它们必然排第一，而 make_task_package 取的是 `outlines[0]` →')
+    print('     任务包会从**剧情卡**里抽 contract / voice_preset / batch_global，')
+    print('     表现为"细纲里明明写好了，却报 3 个【待填】"。')
+    print('     `文风锚点-*.md` 是同款旧坑 —— 所以修法是"排除已知产物 + 优先像细纲的"，')
+    print('     而不是给剧情卡打一个特例补丁。）')
+    _p82 = _tmp / '_guard_outline_order'
+    try:
+        _shx.rmtree(_p82)
+    except Exception:
+        pass
+    (_p82 / '细纲').mkdir(parents=True, exist_ok=True)
+    # 三个文件都排在真实细纲之前（按 Unicode 码位）
+    (_p82 / '细纲' / '剧情卡-第01-05章.md').write_text('# 剧情卡\n', encoding='utf-8')
+    (_p82 / '细纲' / '文风锚点-第1批.md').write_text('# 锚点\n', encoding='utf-8')
+    (_p82 / '细纲' / '第01-05章细纲.md').write_text('# 细纲\n', encoding='utf-8')
+    try:
+        from check_contract import find_outline_files  # noqa: PLC0415
+        _names = [p.name for p in find_outline_files(_p82)]
+        _err82 = ''
+    except Exception as _e:                              # pragma: no cover
+        _names, _err82 = [], repr(_e)
+    # 断言问的是"**第一份是不是细纲**"（而不是"列表里有没有细纲"）——
+    # 因为故障恰恰是"细纲在列表里，但不在第一"。
+    _ok82 = (bool(_names) and _names[0] == '第01-05章细纲.md')
+    print(f'       find_outline_files → {_names or _err82}')
+    print(f'  {"✓" if _ok82 else "✗"} 细纲不被抢位  →  '
+          f'{"第一份就是细纲" if _ok82 else "**被抢走了！任务包会抽错文件**"}')
+    results.append(_ok82)
+
+    print('83. **空转的传导规则必须可见**（v7.1.1 修：此前是裸 `continue`，守卫永久空转且无人知道）')
+    print('   （成因是**反向传导**：源指南改了措辞、速查卡还留着 → 守卫判"源已无此规则"→ 跳过。')
+    print('     实测 32 行传导规则里 3 行（9%）如此，而且**三行全是反向传导**。）')
+    print('     这类"看起来在工作的守卫"与本项目最忌讳的"假闸门"同源 ——')
+    print('     所以判据是**要看得见**，不是"不许发生"：有意删掉一条规则是合法的。')
+    print('     ⚠️ 本用例同时断言它**不许变成阻塞**（否则会在合法场景下卡住发布）。）')
+    _ar83 = SKILL / 'scripts' / 'audit_release.py'
+    _orig83 = _ar83.read_text(encoding='utf-8')
+    _new83 = _orig83.replace(
+        "r'作者自己的眼睛', r'作者自己的眼睛')",
+        "r'QQQ降级用的不存在锚点', r'作者自己的眼睛')", 1)
+    if _new83 == _orig83:
+        print('  ✗ 传导规则休眠可见：注入未生效（锚点行没找到，守卫可能被改过）')
+        results.append(False)
+    else:
+        _ar83.write_text(_new83, encoding='utf-8')
+        try:
+            _out83 = run_audit()
+        finally:
+            _ar83.write_text(_orig83, encoding='utf-8')
+        # ① 提示要出现 ② 点名到具体那一行 ③ **仍然判通过**（提示不是失败）
+        _ok83 = ('传导规则休眠' in _out83
+                 and '作者画面·是作者的眼睛' in _out83
+                 and '✓ 全部通过' in _out83)
+        print(f'  {"✓" if _ok83 else "✗"} 休眠可见且不阻塞  →  '
+              f'{"提示出现、且仍判通过（对）" if _ok83 else "**没抓到 / 或错误地阻塞了**"}')
+        if not _ok83:
+            print('       输出尾部：', _out83[-320:].replace('\n', ' / ')[:240])
+        results.append(_ok83)
+
+    # ── 阶段级读点守卫（STAGE_CORE）的两个用例 ──────────────────────────
+    # 区段锚点与 audit_release.py 的 STAGE_CORE 里那一行**逐字一致**。
+    _S5 = r'\[\s*\]\s*5\.\s*【必须】修改'
+    _S55 = r'\[\s*\]\s*5\.5'
+    _P3 = 'references/flows/phase3-writing.md'
+
+    print('84. **阶段级守卫有牙齿**：把 `occupancy-rewrite` 从「改写阶段」区段删掉必须报警')
+    print('   （真实缺口：这一步的 8 个读点是刚补上的，而此前**没有任何检查问过')
+    print('     "这一步有没有读点"** —— `_CORE_GUIDES` 只查"这本指南有没有至少一个读点"，')
+    print('     所以把它从这里删掉，审计照样全绿。⚠️ 该词在区段内有 4 处（全部属这一步的读点），')
+    print('     必须**全部**删掉才构成"这一步没有读点"这个故障态。）')
+    results.append(inject_case(
+        '改写阶段缺 occupancy-rewrite', _P3,
+        lambda s: _region_replace(s, _S5, _S55, 'occupancy-rewrite', 'QQQ'),
+        '救不了这个阶段'))
+
+    print('85. **阶段级守卫不会被"别处有读点"骗过**（★ 本轮最重要的一条）')
+    print('   （注入：把 `humanize-toolkit` 从「改写阶段」区段**移走**，但它仍留在 phase3 的')
+    print('     「动笔前」那一步 —— 即**整份文件里仍旧搜得到**。')
+    print('     这条用例钉死的是判据本身：守卫必须**先切区段、再在区段内搜**。')
+    print('     若哪天有人把它退回"按整文件查"，这条用例立刻变红 ——')
+    print('     那种写法会是一个**永远为绿的守卫**，正是本项目最忌讳的"假闸门"。）')
+    results.append(inject_case(
+        '改写阶段缺 humanize-toolkit（别处仍有）', _P3,
+        lambda s: _region_replace(s, _S5, _S55, 'humanize-toolkit', 'QQQ-toolkit'),
+        '救不了这个阶段'))
+
+    # ══════════════════════════════════════════════════════════════════
+    # 86 / 87 / 88：v7.2.0「改写工程」的**校验点**
+    #   背景：用户"改写修改阶段是去 AI 味最重要的环节，现在**问题探得出来、但改得一般**"。
+    #   本轮新增两条工序 —— **不许出现"要求了但不产出"**（本项目已犯过 4 次同型）：
+    #     ① 改前出「修改方案表」（治"14 项耦合 → 多轮打地鼠"）
+    #     ② 改后做「改前改后三行对照」（治"Agent 不知道自己改得有没有效果"）
+    #   三个用例守的正是这两条工序的**校验点**：
+    #     86 = 方案表缺失/字段缺失（**软提示 + 硬拦**两层）
+    #     87 = ★ **"改前 = 改后"必须拦下**（防空改 —— 本轮最重要的一条）
+    #     88 = 单元编号不是摆设（U1–U6 之外 → 报错）
+    #   ⚠️ 判据只停在三件**机器可验**的事：**文件/字段在不在 · 改前 ≠ 改后 ·
+    #      单元编号在不在契约里**。"为什么更好是否具体""单元选得对不对"
+    #      **机器判不了 → 一条判据都不写**（写正则去猜会逼出表演式改写）。
+    # ══════════════════════════════════════════════════════════════════
+    _PLAN_HEAD = '| # | 缺陷项 | 单元 | 定位 | 改成什么 | 会影响 |'
+
+    def _plan_text(entries=None, *, unit='U1', why=True):
+        """改写方案表 fixture —— 字段名与 `guides/rewrite-units.md` 第四节**逐字一致**。
+
+        `entries = [(改前, 改后), …]`；默认一条**真实**改写（改前 ≠ 改后）。
+        """
+        entries = entries if entries is not None else [
+            ('他把火柴塞进兜里。',
+             '他把火柴塞进兜里，指尖在兜口停了一下。外面那盏灯还亮着，他没回头看。')]
+        out = ['# 第 01 章 改写方案', '',
+               '> 依据：`check_human_rhythm.py` 报告（2026-10-09）｜轮次：1', '',
+               _PLAN_HEAD, '|---|---|---|---|---|---|']
+        for i, (_b, _a) in enumerate(entries, 1):
+            out.append(f'| {i} | 平均句长 21（<23） | {unit} | 第 3 段 '
+                       f'| 动作后补一句环境／身体感受 | 句长↑ / p90↑ |')
+        out += ['', '---', '']
+        for i, (_b, _a) in enumerate(entries, 1):
+            out += [f'### #{i}', f'- 改前：{_b}', f'- 改后：{_a}']
+            if why:
+                out.append('- 为什么更好：U1 插入——原句之后补进"身体感受 + 周围环境"，'
+                           '句长 9 → 41 字，位置未变。')
+            out.append('')
+        return '\n'.join(out) + '\n'
+
+    def _workorder_text(retry=0):
+        """`06-章节工单.md` fixture —— 列名与 `make_workorder.COLS` 逐字一致。"""
+        return ('# 章节工单（《测试》）—— 机器写的度量\n\n'
+                '> 由 `scripts/make_workorder.py` 追加。\n\n'
+                '| 章节 | 字数 | 机械结论 | 缺陷类型 | 返工轮次 | 备注 |\n'
+                '|---|---|---|---|---|---|\n'
+                f'| 第1章 | 3000 | 2 项 | 节律、词汇 | {retry} | |\n')
+
+    def _mk_rewrite_proj(base, *, plan='ok', workorder=0, **plan_kw):
+        """在 `_mk_concrete_proj` 之上加「改写方案表 + 章节工单」两个 fixture。
+
+        ⚠️ **其余必须全绿**（control 得 exit 0）——否则"我以为抓到了方案表，
+        其实抓到的是别的东西"。（与用例 78 同款对照设计。）
+        `plan=None` → **不产出**方案表；`workorder=None` → **不产出**工单。
+        """
+        _mk_concrete_proj(base, True, plot='pad2')
+        if plan is not None:
+            _d = base / 'chapters' / '_meta'
+            _d.mkdir(parents=True, exist_ok=True)
+            (_d / '第01章-改写方案.md').write_text(_plan_text(**plan_kw), encoding='utf-8')
+        if workorder is not None:
+            (base / '06-章节工单.md').write_text(_workorder_text(workorder),
+                                                 encoding='utf-8')
+        return base
+
+    print('86. **改写方案表缺失 / 字段缺失 → 软提示 + 硬拦**（两层，性质不同）')
+    print('   （v7.2.0 之前"出了方案表"和"没出"过闸门的结果完全一样 ——')
+    print('     而这是"生成点有了、交付点有了、校验点没有"的**第 4 次**。）')
+    print('   ⚠️ **两层刻意分开**：')
+    print('     · **硬层** = 方案表**存在**时校验格式（文件/字段在不在、改前≠改后）；')
+    print('     · **软层** = **返工过却没有方案表** → 只**提示**、**不阻塞**。')
+    print('       为什么不阻塞：触发源 `06-章节工单.md` 的「返工轮次」由 `--retry` 写入，')
+    print('       **默认值是 0 —— "没填"与"真的是 0"长得一样** → 这个源**有漏报**。')
+    print('       **有漏报的判据不许当硬闸门**（那就是造假闸门）；它只配做提示。')
+    _p86a = _mk_rewrite_proj(_tmp / '_guard_plan_ok', plan='ok', workorder=0)
+    _rc86a, _o86a = _run_gate(_p86a)
+    # 注入 A：工单记着返工过（轮次 1），但**没有**方案表 → 软提示（不阻塞）
+    _p86b = _mk_rewrite_proj(_tmp / '_guard_plan_none', plan=None, workorder=1)
+    _rb86, _ob86 = _run_gate(_p86b)
+    # 注入 B：方案表**存在**但删掉「为什么更好：」→ 硬拦，且报的是**缺字段**
+    #         （**这正好反证解析器认得出这个文件** —— 不是"没找到文件"）
+    _p86c = _mk_rewrite_proj(_tmp / '_guard_plan_nowhy', plan='nowhy', why=False)
+    _rc86c, _oc86c = _run_gate(_p86c)
+    print(f'       control（方案表完整·工单无返工）exit={_rc86a}（应 0）｜'
+          f'注入A（无方案表·返工过）exit={_rb86}（**应 0 —— 软层不该阻塞**）｜'
+          f'注入B（有表缺字段）exit={_rc86c}（应 1）')
+    # ⚠️ 断言用**专用标记**，不用"改写方案表"这种也会出现在"补法提示"里的词 ——
+    #    本项目已有两次"断言命中无关文本"的假通过。
+    _ok86 = (_rc86a == 0 and _rb86 == 0 and _rc86c == 1
+             and ('没有改写方案表' in _ob86)          # 软提示真的念出来了
+             and ('【改写方案表不合规】' in _oc86c)   # 硬层真的拦下了
+             and ('缺「为什么更好：」' in _oc86c))     # 报"缺字段"，不是"没有文件"
+    print(f'  {"✓" if _ok86 else "✗"} 方案表两层  →  '
+          f'{"抓到（软提示 + 硬拦 + 缺字段反证）" if _ok86 else "**没抓到！**"}')
+    if not _ok86:
+        print('       注入B 输出尾部：', _oc86c[-300:].replace('\n', ' / ')[:220])
+        print('       注入A 输出尾部：', _ob86[-300:].replace('\n', ' / ')[:220])
+    results.append(_ok86)
+
+    print('87. ★ **「改前 = 改后」必须拦下**（防空改 —— 本轮最重要的一条）')
+    print('   （三行对照最容易退化成**形式主义**：把 `改前：` 抄一遍写进 `改后：`。')
+    print('     "改完了"其实是"抄了一遍"，这是本轮最可能发生的假工作。')
+    print('   ⚠️ 归一化口径（这就是判据本身，别放宽）：**只保留汉字/字母/数字**，')
+    print('     空白、标点、markdown 装饰**全部丢掉再比** —— 所以')
+    print('     **"只改标点/只加空格"也算空改**（`。` → `，` 不是内容上的改动）。')
+    print('     反过来，只要真换过词，归一化后必然不同 → 不会误拦。）')
+    _p87a = _mk_rewrite_proj(_tmp / '_guard_plan_ok2', plan='ok', workorder=0)
+    _rc87a, _o87a = _run_gate(_p87a)
+    # 注入 A：改后**逐字抄**改前
+    _p87b = _mk_rewrite_proj(_tmp / '_guard_plan_copy', plan='copy', workorder=0,
+                            entries=[('他把火柴塞进兜里。', '他把火柴塞进兜里。')])
+    _rb87, _ob87 = _run_gate(_p87b)
+    # 注入 B：只改标点（`。` → `，`）—— 同样算空改
+    _p87c = _mk_rewrite_proj(_tmp / '_guard_plan_punct', plan='punct2', workorder=0,
+                            entries=[('他把火柴塞进兜里。', '他把火柴，塞进兜里。')])
+    _rc87c, _oc87 = _run_gate(_p87c)
+    print(f'       control（真实改写）exit={_rc87a}（应 0）｜'
+          f'注入A（逐字抄）exit={_rb87}（应 1）｜'
+          f'注入B（只改标点）exit={_rc87c}（应 1）')
+    _ok87 = (_rc87a == 0 and _rb87 == 1 and _rc87c == 1
+             and ('【改写方案表不合规】' in _ob87)
+             and ('归一化后完全相同' in _ob87)
+             and ('归一化后完全相同' in _oc87))
+    print(f'  {"✓" if _ok87 else "✗"} 空改被拦下  →  '
+          f'{"抓到（抄一遍 + 只改标点，都拦）" if _ok87 else "**没抓到！形式主义溜过去了**"}')
+    if not _ok87:
+        print('       注入A 输出尾部：', _ob87[-300:].replace('\n', ' / ')[:220])
+        print('       注入B 输出尾部：', _oc87[-300:].replace('\n', ' / ')[:220])
+    results.append(_ok87)
+
+    print('88. **单元编号不是摆设**：`单元` 列里出现的编号必须落在 U1–U6 之内')
+    print('   （★ **只查这一件事** —— "这个单元选得对不对"是理解级判断，机器判不了，')
+    print('     交质检子代理。这一条只钉住"编号来自契约"，防止 U7/UX 这类**不存在的')
+    print('     单元**流进流程（一旦流进去，下游按它去翻 rewrite-units.md 就翻不到）。')
+    print('   ⚠️ control 用 `U5/U6` 复合写法：**同一含义的多种写法都要认** ——')
+    print('     "只认单个 U1"的窄锚点会把合规表判死。')
+    _p88a = _mk_rewrite_proj(_tmp / '_guard_unit_ok', plan='ok', workorder=0, unit='U5/U6')
+    _rc88a, _o88a = _run_gate(_p88a)
+    _p88b = _mk_rewrite_proj(_tmp / '_guard_unit_u7', plan='u7', workorder=0, unit='U7')
+    _rb88, _ob88 = _run_gate(_p88b)
+    _p88c = _mk_rewrite_proj(_tmp / '_guard_unit_ux', plan='ux', workorder=0, unit='UX')
+    _rc88c, _oc88 = _run_gate(_p88c)
+    print(f'       control（`U5/U6` 复合写法）exit={_rc88a}（应 0）｜'
+          f'注入A（`U7`）exit={_rb88}（应 1）｜注入B（`UX`）exit={_rc88c}（应 1）')
+    _ok88 = (_rc88a == 0 and _rb88 == 1 and _rc88c == 1
+             and ('未知单元' in _ob88) and ('U7' in _ob88)
+             and ('未知单元' in _oc88) and ('UX' in _oc88))
+    print(f'  {"✓" if _ok88 else "✗"} 未知单元被拦  →  '
+          f'{"抓到（U7 / UX 都拦，U5/U6 放行）" if _ok88 else "**没抓到！**"}')
+    if not _ok88:
+        print('       注入A 输出尾部：', _ob88[-300:].replace('\n', ' / ')[:220])
+    results.append(_ok88)
+
+    for _d in (_p18, _p19, _p21, _p78, _p78b, _p79, _p80, _p80b, _p80c, _p81, _p82,
+               _p86a, _p86b, _p86c, _p87a, _p87b, _p87c, _p88a, _p88b, _p88c):
         try:
             _shx.rmtree(_d)
         except Exception:
@@ -872,10 +1553,18 @@ def main():
     restore_scripts()
     tail = run_audit()
     ok_restore = '全部通过' in tail
+    # ★ 确认全绿 = 树干净 → 清空注入日志。不清的话，个别未配对的登记会让日志常驻，
+    #   下一次自愈就会去回滚一些**根本没在被注入状态**的文件（用新坑换旧坑）。
+    if ok_restore:
+        _journal_clear()
     print()
     print('=' * 74)
     print(f'还原后：{"✓ 重新全绿" if ok_restore else "✗ 还原不干净！（内存备份还原失败，请手工检查改动过的文件）"}')
     print(f'注入用例：{sum(results)}/{len(results)} 被抓到')
+    if not ok_restore:
+        print('提示：若你刚才用 `head`/`tail` 截断过输出，进程可能被 SIGPIPE 杀掉 →'
+              ' 直接重跑一次本脚本即可自愈（它会回放注入日志）；'
+              '也可 `grep -rn "QQQ" --include=*.md --include=*.py .` 手工查残留。')
     print('=' * 74)
     return 0 if (all(results) and ok_restore) else 1
 

@@ -328,6 +328,144 @@ def parse_waivers(text: str):
     return pairs, problems
 
 
+# ──────────────────────────────────────────────────────────────
+# 实物清单（_meta）解析（2026-10-09 v7.1.1 收归共享）
+# ──────────────────────────────────────────────────────────────
+# **为什么收归**：v7.0.0 加「具体性三站」（生成点 / 交付点 / 校验点）时，解析器被
+# 复制成了多份 —— `parse_concrete_list` **3 份**（make_task_package / check_contract /
+# check_batch_gate）、`find_meta_file` **2 份**、`CHAPTER_DIRS` **4 份**（3 个调用方
+# 各一份 + 本文件的 `_CHAPTER_DIRS`，而且三处注释都写着"与 _shared.find_chapter_files
+# 同口径"—— 那句注释本身，就是"靠人肉同步"的证据）。
+# CHANGELOG v7.0.0 的「遗留」点名了这件事：功能一致且都自测过，但这是本项目最忌讳的
+# 「**双载体同名必漂**」—— 三份今天等价，改一份漏两份只是时间问题。
+#
+# **收归时取的是哪一份**：
+#   · `find_meta_file` 取 `check_batch_gate.py` 的那份：它的章号正则是
+#     `第\s*0*(\d{1,4})\s*章` —— **显式吃掉前导零**，与同文件 `PLOT_NO_RX` 同口径。
+#     `make_task_package.py` 那份写 `第\s*(\d{1,4})\s*章`，靠后面的 `int()` 兜住前导零：
+#     三种写法结果相同，但**意图没有写进正则** —— 下一个人可能顺手改成别的正则，
+#     而不知道"前导零"是被 `int()` 兜着的。两份的目录列举与 rglob 兜底完全一致。
+#   · `parse_concrete_list` 三份**逐字等价**（只差返回注解：一份 `-> list`，两份没有），
+#     函数体一模一样，取任一即可；这里补上 `list[str]`，让契约在签名上就看得见。
+#   · `find_meta_files`（复数版，按目录列举）只有 check_contract 一份，直接搬过来。
+#
+# ⚠️ **解析规则是跨 agent 的接口契约，改它要同步所有调用方**：
+#   落盘位置 = `chapters/_meta/<章名>.meta.md` 的「## 实物清单」段；
+#   解析 = 定位 `## 实物清单` 标题行 → 向下取 `- ` 开头的列表项 →
+#   遇到下一个 `## ` 或文件结束为止；条目文本去首尾空白。
+#   生成点（`make_task_package` 抽进任务包 `concrete_list` 槽位）与校验点
+#   （`check_batch_gate` 硬拦、`check_contract` 覆盖率）**必须看同一份清单**，
+#   否则"编译过的包"和"验收的闸门"看的不是同一套东西 —— 这正是重复实现最危险的后果。
+#
+# **章号为什么必须认三种写法**（`第 6 章` / `第 06 章` / `第001章`）：
+#   真实项目里三种**都出现过**（v7.1.0 的端到端实测用的就是这三种）。只认一种 =
+#   对另外两种项目**静默看不见** —— 而"该有的东西静默消失"在本项目已复发三次
+#   （`正文/` 目录、`index` 字段、`_meta/` 本身），所以这里宁可宽。
+META_DIR = '_meta'
+CONCRETE_HEAD = '实物清单'
+META_GLOB = '*.meta.md'
+# 章节目录名的**公开名**：三个调用方此前各自复制过一份（`CHAPTER_DIRS = (...)`
+# 还都带着"与 _shared.find_chapter_files 同口径"的注释 —— 靠人肉同步的典型）。
+# 值只有**一处字面量**（上面 `_CHAPTER_DIRS`，`find_chapter_files` 沿用它）；
+# 这里是同一个元组的另一个名字，不是副本 —— 所以不存在漂移的可能。
+CHAPTER_DIRS = _CHAPTER_DIRS
+# 章号兼容三种写法：前导零由 `0*` **显式**吃掉，不靠下游 `int()` 兜。
+META_NO_RX = re.compile(r'第\s*0*(\d{1,4})\s*章')
+
+
+def find_meta_files(chapters_root) -> list:
+    """列举项目里的 `_meta/*.meta.md`（**复数版**，给 check_contract 算实物覆盖率）。
+
+    目录名与 `find_chapter_files` 同口径（chapters / 正文 / 章节目录），
+    并保留项目根 `_meta/` 的兜底 —— 判据宁可宽一点，不要因为目录名换个写法就
+    **看不见**。**不做 rglob 兜底**：复数版是"列举"，结构不规范时交给单数版
+    `find_meta_file` 的全库兜底，别把两份的语义搅在一起。
+    """
+    from pathlib import Path
+    root = Path(chapters_root)
+    out = []
+    for d in _CHAPTER_DIRS:
+        sub = root / d / META_DIR
+        if sub.is_dir():
+            out += list(sub.glob(META_GLOB))
+    sub = root / META_DIR
+    if sub.is_dir():
+        out += list(sub.glob(META_GLOB))
+    return sorted(set(out))
+
+
+def find_meta_file(root, chapter_no):
+    """找本章的 `_meta` 元数据文件（**单数版，按章号找**）。返回 Path；找不到返回 None。
+
+    命名兼容 `第01章-标题.meta.md` 与 `第1章.meta.md`，章号认
+    `第 6 章` / `第 06 章` / `第001章`（见本节的说明）。结构不规范的老项目兜底到全库 rglob。
+
+    ⚠️ 找不到**不是异常** —— 后果由调用方各自决定：`check_batch_gate` 把它转成
+    **阻塞项**（"该有的东西静默消失"的入口），`make_task_package` 把它转成 TODO
+    （编译期拒绝开工）。共享层不替它们做这个决定。
+    """
+    from pathlib import Path
+    root = Path(root)
+    cands = []
+    for d in _CHAPTER_DIRS:
+        sub = root / d / META_DIR
+        if sub.is_dir():
+            cands += list(sub.glob(META_GLOB))
+    sub = root / META_DIR
+    if sub.is_dir():
+        cands += list(sub.glob(META_GLOB))
+    if not cands:                                  # 老项目结构不规范时的兜底
+        cands = list(root.rglob(META_GLOB))
+    for p in sorted(set(cands)):
+        m = META_NO_RX.search(p.name)
+        if m and int(m.group(1)) == chapter_no:
+            return p
+    return None
+
+
+def parse_concrete_list(text: str) -> list[str]:
+    """抽「实物清单」条目 —— **解析规则是跨 agent 的接口契约，不许改**。
+
+    定位 `## 实物清单` 标题行 → 向下取 `- ` 开头的列表项 →
+    遇到下一个 `## ` 或文件结束为止。条目文本去首尾空白。
+
+    ⚠️ 标题行用 `[^\\n]*$` 吃掉标题后面的括号说明（真实写法是
+    `## 实物清单（本章 3–8 项：只属于这一章的东西）`），**不要收紧成标题精确相等**
+    —— 收紧会让所有合规项目都解析出 0 项。
+    """
+    m = re.search(r'(?m)^##\s*' + CONCRETE_HEAD + r'[^\n]*$', text)
+    if not m:
+        return []
+    rest = text[m.end():]
+    nxt = re.search(r'(?m)^##\s', rest)
+    body = rest[:nxt.start()] if nxt else rest
+    items = []
+    for line in body.split('\n'):
+        mm = re.match(r'^-\s+(.*)$', line.strip())
+        if not mm:
+            continue
+        item = mm.group(1).strip()
+        if item:
+            items.append(item)
+    return items
+
+
+def meta_body_path(meta_path):
+    """由 `_meta/第01章-测试.meta.md` 推出正文文件 `第01章-测试.md`。
+
+    规则（接口契约）：正文 = **`_meta/` 的上一级目录**下，去掉 `.meta` 的那个文件；
+    `_meta/` 不在标准位置时退到同目录。
+    """
+    from pathlib import Path
+    p = Path(meta_path)
+    name = p.name
+    if name.endswith('.meta.md'):
+        name = name[: -len('.meta.md')]
+    if p.parent.name == META_DIR:
+        return p.parent.parent / (name + '.md')
+    return p.parent / (name + '.md')
+
+
 if __name__ == '__main__':
     import sys, io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')

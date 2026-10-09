@@ -70,7 +70,7 @@ THRESHOLDS = {
                          desc='句首引号占比 %', why='人类让对话先行（三作者 18.4–30.6%，AI 0–1.4%）'),
     'sent_mean':    dict(kind='min',   hard=18.0,  soft=23.0,  humans='22.7–36.6', human=30.0,
                          desc='平均句长(字)', why='弱判据：hard=18 只拦最极端的碎句；**目标区间是 23–37（人类均值 30.8）**，soft=23 提示未进人类区间（惊悚乐园 24.4 亦达标）'),
-    'dash':         dict(kind='max',   hard=1.5,   soft=0.5,   humans='0.03–0.29（本轮实测）', human=0.16,
+    'dash':         dict(kind='max',   hard=1.5,   soft=0.5,   humans='0.03–0.29', human=0.16,
                          desc='破折号/千字', why='破折号是"句子写完了再补一刀"的痕迹。2026-09-16 收紧软线到 0.5（人类 3 部实测 0.03–0.29，AI 0.32–5.94）——写作目标**趋向清零**：用逗号或句号，补充信息并入主句'),
     'body':         dict(kind='max',   hard=1.0,   soft=0.85,  humans='0.31–0.55', human=0.32,
                          desc='身体部位/千字', why='SKILL 教"情绪身体化"后被顶格执行到人类的 7 倍'),
@@ -90,7 +90,14 @@ THRESHOLDS = {
                          desc='对话占比 %',
                          why='**下限 10% 硬（防退化成旁白）／ 20% 软提示；上限 40% 硬（防堆对话）**'),
     'act_density':  dict(kind='max',   hard=0.40,  soft=0.30,  humans='0.106–0.247', human=0.114,
-                         desc='动作短语密度/千字', why='按密度算（非绝对次数）：AI 是人类的 6–8 倍'),
+                         no_range=True,
+                         desc='动作短语密度/千字',
+                         why='按密度算（非绝对次数）：AI 是人类的 6–8 倍。'
+                             '⚠️ `no_range=True` —— 这一项**不参与「人类区间命中率」**：'
+                             '`ACTION_PATTERNS` 是**违禁品清单**（皱起眉头／握紧拳头／深吸一口气…），'
+                             '**密度低 = 好事**，与 humans 那个区间的语义**正好相反**。'
+                             '（2026-09-16 已因此删掉它的下限提示；2026-10-07 补上区间豁免 ——'
+                             '否则新增的「★ 补足清单」会把"没有 AI 万能动作标签"误报成"该补动作"。）'),
 
     # ---- 深度分布指标（第二轮诊断新增；基线 = 3 人类 + 4 AI 实测，均完全分离）----
     # 为什么加这一层：均值已能达标（句长/情绪词/破折号），但读起来仍有 AI 味。
@@ -107,7 +114,7 @@ THRESHOLDS = {
                          desc='长对话(≥30字)占比 %', why='人类对话里有"一段完整发言"（讲道理/诉苦/回忆/辩解），AI 全是短促的信息交换（4.1–14.6%）'),
     'digit_density': dict(kind='range', lo=0.8, hi=8.0, soft=1.2, humans='1.16–3.15', human=2.5,
                          desc='数字/千字（具体性）', why='人类用具体数字锚定世界（1.16–3.15），AI 几乎不用（0.05–0.83）——差 1.4–60 倍'),
-    'real_measure': dict(kind='min',   hard=0.05,  soft=0.12,  humans='0.07–0.72（现实题材）', human=0.30,
+    'real_measure': dict(kind='min',   hard=0.05,  soft=0.12,  humans='0.07–0.72', human=0.30,
                          desc='现实锚定计量/千字', why='**人类技法型指标（第 15 项，实测 19 倍、接近完全分离）**：人类用真实世界的数目锚定现实——"998 的套餐""9 月 1 号""602 宿舍""月薪六千"。'
                               'AI 几乎只用面板数值（7／100、17 秒），从不锚定现实。'
                               '⚠️ 两点注意：① **题材敏感**——架空/游戏世界豁免（人类《惊悚乐园》仅 0.07，因其世界观里没有钱），只在现实或半现实题材判；'
@@ -224,6 +231,60 @@ FUNC_CHARS = set('的了着在是不是也就都很还又要和会没说有把�
 _CJK = re.compile(r'[\u4e00-\u9fff]')
 _ENCODINGS = ('utf-8', 'gb18030', 'gbk', 'utf-16', 'big5')
 _MIN_CJK_RATIO = 0.30      # 中文字符占比低于此值 → 判定为解码失败，报错退出
+
+
+# ══════════ 显示宽度对齐（2026-10-07 新增）══════════
+# **为什么需要**：这份报告是**中英混排**的（指标名是中文、数值是 ASCII），
+# 而 Python 的 `f'{s:>14}'` 按**字符数**填充、不按**显示列数**。
+# 中文在终端占 2 列，于是：
+#   实测出现 `破折号/千字  0.540.03–0.29（本轮实测）` —— **实测值与人类范围粘成一片**。
+# 人工读表时会把 `0.54` 读成 `0.540.03`，**程序解析更会直接崩**（本轮诊断时就踩到：
+# `float('0.440.07')` 抛 ValueError）。
+# **一张读不清的表，等于没有表** —— 而这张表是 Agent 唯一的"该改哪一项"依据。
+def _dw(s) -> int:
+    """字符串的终端显示列数：CJK / 全角标点算 2 列，其余 1 列。"""
+    return sum(2 if ('\u4e00' <= ch <= '\u9fff' or '\u3000' <= ch <= '\u303f'
+                     or '\uff00' <= ch <= '\uffef') else 1 for ch in str(s))
+
+
+def _pad(s, width: int, align: str = '<') -> str:
+    """按**显示列数**填充到 width。超出时至少保证一个空格，不粘连。"""
+    s = str(s)
+    space = max(0, width - _dw(s))
+    if align == '>':
+        return ' ' * space + s
+    return s + ' ' * space + ('' if space else ' ')
+
+
+# ══════════ 偏低项 → 具体补法（2026-10-07 新增）══════════
+# **为什么需要它**：这套体系此前只会说"这一项偏低"，**不说什么**。
+# 实测三项目 35 章：**平均句长 19 章偏低、句首代词 16 章偏高、破折号 14 章偏高** ——
+# 但这三个都是 CTQ 分层后的「参考指标（不阻塞）」，于是**报告念了、没人改**。
+# 一份只报数字不给动作的报告，读起来的价值和"什么都没说"差不多。
+#
+# **本轮诊断的核心发现**：这些"偏低"项不是随机噪声，而是同一个病的三个影子 ——
+# **句子太短、都以代词开头、靠破折号补刀 = "碎句流" = 干净但空洞**。
+# 而空洞的成因是**我们的配额几乎全是"压住"（≤），"补足"（≥）只有三项且都是数数型**。
+_FIX_HINT = {
+    'sent_mean':   '**在短句之间插入铺陈句**（不是把短句改长）——一个动作之后，补一句它周围的环境或身体的感受，让它自己长起来。见 `rewrite-playbook.md` **第 3 节**（补足顺序 A-1，最高杠杆的一步）',
+    'quote_head':  '让更多句子**从对话开始**：把「他说：\"……\"」改成直接以引号起句；或把纯叙述句改成"说话 + 补充动作"',
+    'emotion':     '补 1–2 处**直说或动作**——这一项是**区间**不是下限，被"禁情绪词"禁过头了。见 `human-rhythm.md` 规则 6（三种写法混用）',
+    'body':        '补身体反应（手／脚／胸口／后颈），但**别全用身体写情绪**——那是另一种单一化',
+    'simile':      '补 1–2 个比喻，其中 **≥1 个非明喻**。见 `human-quota.md`',
+    'digit_density': '**补具体数字**——"三年前""两指宽""七步""一百九十三文"。数字是把叙述锚进现实的绳（人类 1.16–3.15/千字）。见 `rewrite-playbook.md` 第 9 节',
+    'real_measure': '**补现实锚定**——真实世界的数目／日期／门牌／价格（"998 的套餐""9 月 1 号""602 宿舍""月薪六千"）。人类技法第 15 项，实测 **19 倍分离**（注：基线取自现实题材，架空/奇幻题材天然偏低，判读放宽）。见 `rewrite-playbook.md` 第 9 节',
+    # ⚠️ `act_density` **故意没有补法**：它数的是 `ACTION_PATTERNS`（违禁品清单）的密度，
+    #    **低 = 好事**。给它写"补动作描写"会把 Agent 推向 AI 万能动作标签（2026-10-07 修）。
+    #    它的区间豁免见 THRESHOLDS 里的 `no_range=True`。
+    'long_sent_pct': '补 **1 句 ≥60 字的长句**——用逗号铺陈，**不要用破折号**。见 `rewrite-playbook.md` 第 3 节',
+    'sent_p90':    '同上：补长句把 p90 抬起来（p90 低 = 全篇没有"敢写长"的地方）',
+    'long_dialog': '**让某个角色把一段话说完**（≥30 字完整发言）——人类 15.8–27.7%。它是"人在说话"而不是"信息交换"的标志',
+    'cn_measure':  '补中文量词（一截／一根／两把／三片）',
+    'rhythm_cv':   '节奏太平——**拉开长短句对比**，别让全篇句长都在一个带上',
+    'author_presence': '补**叙述者插话**（作者跳出来解释／吐槽／埋梗／给数值），用作者口吻、不是角色互相科普。见 `human-rhythm.md` 规则 7',
+    'dialog':      '补对话——**<10% 是结构性缺失**（整个对话维度塌了、退化成旁白）',
+    'pron_head':   '（偏高项）把句子主语从代词换成物/景/动作——"光从窄窗进来"而不是"他看到光进来"',
+}
 
 
 def read_text(path) -> str:
@@ -402,12 +463,145 @@ def grade(key, val):
     return 'PASS', ''
 
 
+def _hit_stats(r):
+    """命中率统计。返回 (hits, miss, low, high)。
+
+    抽成函数（2026-10-07）是为了让**项目级体检**和单章报告用**同一套判据**——
+    否则两处的"命中率"会各算一套，那又是"双载体漂移"。
+    """
+    hits, miss = [], []
+    for k, t in THRESHOLDS.items():
+        # ⚠️ `no_range=True` 的指标不参与区间命中率 —— 它们的 humans 区间**语义与判据相反**
+        #    （`act_density` 是违禁品密度：**低 = 好事**，落在"区间内"反而是坏的）。
+        #    这一类若混进区间统计，会被误判成"偏低 → 该补足"，**方向完全反了**。
+        if t.get('no_range'):
+            continue
+        v = r.get(k)
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            continue
+        m = re.search(r'([0-9.]+)[ ]*[–—-][ ]*([0-9.]+)', str(t.get('humans', '')))
+        if not m:
+            continue
+        lo, hi = float(m.group(1)), float(m.group(2))
+        if lo <= v <= hi:
+            hits.append(k)
+        else:
+            miss.append((k, t['desc'], v, lo, hi))
+    return (hits, miss,
+            [x for x in miss if x[2] < x[3]],
+            [x for x in miss if x[2] > x[4]])
+
+
+def project_summary(files):
+    """项目级人味体检：汇总，不逐章打印。
+
+    **为什么加**（2026-10-07，用户体验）：此前想知道"这本书整体离人有多远"，
+    得逐章跑脚本、再人工把 17 项拼起来 —— 本轮诊断三项目 35 章时，
+    我是临时写了一段 Python 才拼出来的。**Agent 和作者都不会这么做。**
+    一条命令给全局画像，才知道"该补什么、从哪一章开始"。
+    """
+    import collections
+    import statistics as _st
+    rows, all_low, all_high = [], collections.Counter(), collections.Counter()
+    # `digits` 单独收一份原始值：末尾的诚实提示要用**中位数**（v7.0.0）。
+    # 不能复用 `all_low` —— 那是"命中率不达标"的计数，不是实测值本身。
+    digits = []
+    for f in files:
+        # 排除备份稿：它们不是"这一版"的正文，混进来会让命中率曲线失真
+        # （实测某项目 17 章里混进 2 个 `原稿备份`，最低命中率 6% 就是备份稿）。
+        if '原稿备份' in f.name or f.name.endswith('.bak.md'):
+            continue
+        r = analyze(read_text(f))
+        if not r:
+            continue
+        hits, miss, low, high = _hit_stats(r)
+        tot = len(hits) + len(miss)
+        if not tot:
+            continue
+        rows.append((f.name, 100 * len(hits) / tot, len(low), len(high)))
+        if isinstance(r.get('digit_density'), (int, float)):
+            digits.append(r['digit_density'])
+        for x in low:
+            all_low[x[0]] += 1
+        for x in high:
+            all_high[x[0]] += 1
+    if not rows:
+        print('[错误] 没有可用章节')
+        return 2
+    print('=' * 74)
+    print('项目级人味体检 —— %d 章（单章明细见不带 --project 的用法）' % len(rows))
+    print('=' * 74)
+    print(_pad('章节', 28) + _pad('命中率', 9, '>') + _pad('偏低', 7, '>') + _pad('偏高', 7, '>'))
+    for name, pct, nl, nh in rows:
+        mk = '✗' if pct < 20 else ('△' if pct < 35 else '✓')
+        print(_pad(name[:26], 28) + _pad('%.0f%%' % pct, 9, '>')
+              + _pad(nl, 7, '>') + _pad(nh, 7, '>') + '  ' + mk)
+    pcts = [x[1] for x in rows]
+    below = sum(1 for x in pcts if x < 20)
+    print('-' * 74)
+    print('  命中率：中位 %.0f%% ｜ 最低 %.0f%% ｜ 最高 %.0f%%' % (
+        _st.median(pcts), min(pcts), max(pcts)))
+    print('  低于人类硬线 20%% 的章：%d/%d%s' % (
+        below, len(rows), '   ✗ 整本系统性偏离，不是个别章的问题' if below * 2 > len(rows) else ''))
+    print()
+    if all_low:
+        print('  ★ 系统性偏低（反复出现 = 该整体补足，不是单章问题）：')
+        for k, n in all_low.most_common(4):
+            print('     · %s —— %d 章' % (THRESHOLDS[k]['desc'], n))
+            hint = _FIX_HINT.get(k)
+            if hint:
+                print('       → %s' % hint)
+    if all_high:
+        print('  ★ 系统性偏高（反复出现 = 配额被当成了目标）：')
+        for k, n in all_high.most_common(4):
+            print('     · %s —— %d 章' % (THRESHOLDS[k]['desc'], n))
+    print()
+    if sum(all_low.values()) > sum(all_high.values()):
+        print('  → **全项目结论：欠写（多数偏低）** —— 先补足，再压住。')
+        print('     照上面「系统性偏低」逐项补；顺序见 `rewrite-playbook.md` 补足顺序 A。')
+    else:
+        print('  → **全项目结论：配额拉满（多数偏高）** —— 见 `rewrite-playbook.md` 压住顺序 B。')
+
+    # ══════════ 「绿 ≠ 人味」诚实提示（2026-10-07 v7.0.0 新增）══════════
+    # **为什么加在项目体检末尾、且无论通过与否都打印**：
+    # 用户的真实申诉是"**脚本全绿但读起来还是很 AI**"。此前这份报告只给频率读数，
+    # 于是"全绿"被当成了"像人写的"——**用户无处申诉，因为报告本身就在替错误的结论背书**。
+    # 这一块的作用不是加判据，而是**把边界说出来**：本脚本测得了什么、测不了什么。
+    # ⚠️ 与 v6.9.0「闲笔密度」那次失败同一条纪律：**测不了就承认测不了，
+    #    不要造一个看起来在工作的闸门**。所以这里只给提示，**绝不改退出码**。
+    # ⚠️ 本块是**整行文本、没有要对齐的列**，因此不涉及 `_dw()`/`_pad()` 处理的
+    #    "中英混排列宽错算"（那个坑只在**有列的表格**里发生）。将来若给它加列，必须走 `_pad()`。
+    print()
+    print('  ⚠️ 频率全绿 ≠ 本体像人。')
+    print('     上面这些项测的都是「多长／多密／多少次」——它们能把"不像 AI 的平均像"压到及格，')
+    print('     测不了「**这个细节是不是只属于这本书**」（那需要理解，正则做不到，本脚本不会假装能测）。')
+    print('     → 绿灯只说明你没踩频率坑，**不代表**读起来像某个人写的。')
+    print('     → 本体层走可替换性四问：`guides/specificity-gate.md` 第三节 / `guides/review-agent.md` 第五项。')
+    # ── 额外点名：**只在有真实证据时打，不硬凑** ──────────────────────────
+    # `digit_density` 是 THRESHOLDS 里已存在、已实测的指标（人类 1.16–3.15），
+    # 所以拿它点名**不是新造判据**，只是把已有读数翻译成一句人话。
+    # 下沿从 THRESHOLDS 现读（不写死数字）——避免"脚本与文档两处各写一份"的漂移。
+    _dlo = None
+    _dm = re.search(r'([0-9.]+)[ ]*[–—-][ ]*([0-9.]+)',
+                    str(THRESHOLDS['digit_density'].get('humans', '')))
+    if _dm:
+        _dlo = float(_dm.group(1))
+    if digits and _dlo is not None:
+        _dmed = _st.median(digits)
+        if _dmed < _dlo:
+            print('     · 数字密度中位 %.2f 低于人类下沿 %s —— 具体性偏薄，'
+                  '可能是靠调频率达标的（"指标全绿但仍显空"的常见成因）' % (_dmed, _dlo))
+    # ⚠️ 本块**不参与退出码**：提示就是提示（`return` 语义与加它之前逐字一致）。
+    return 1 if below else 0
+
+
 def report(name, r, as_json=False):
     if as_json:
         return dict(file=name, metrics=r, verdict={k: grade(k, r[k])[0] for k in THRESHOLDS})
     print(f'\n===== {name} =====')
-    print(f"{'指标':<20}{'实测':>9}{'人类范围':>14}{'目标':>12}{'判定':>7}")
-    print('-' * 66)
+    print(_pad('指标', 22) + _pad('实测', 10, '>') + _pad('人类范围', 15, '>')
+          + _pad('目标', 13, '>') + '  判定')
+    print('-' * 72)
     fails = warns = 0
     for key, t in THRESHOLDS.items():
         val = r[key]
@@ -424,8 +618,9 @@ def report(name, r, as_json=False):
             goal = f"{t['lo']}–{t['hi']}"
         mark = {'PASS': '✓', 'WARN': '△', 'FAIL': '✗', 'SKIP': '–'}[st]
         shown = "—" if val is None else val
-        print(f"{t['desc']:<20}{shown:>9}{t['humans']:>14}{goal:>12}   {mark} {note}")
-    print('-' * 66)
+        print(_pad(t['desc'], 22) + _pad(shown, 10, '>') + _pad(t['humans'], 15, '>')
+              + _pad(goal, 13, '>') + '  ' + mark + ' ' + note)
+    print('-' * 72)
     for key, t in WEAK.items():
         if t.get('soft') is None:
             print(f"  [不判] {t['desc']} = {r[key]}（人类 {t['human']}）—— {t['note']}")
@@ -442,19 +637,9 @@ def report(name, r, as_json=False):
     # 因为 max 型指标把「0」当最完美（身体/动作/量词），min 型指标的硬线又都设得比人类下沿松
     # （句长 18 vs 22.7、长对话 8 vs 15.8、超长句 3 vs 4.7）。
     # 于是"全绿"被读成"达标"，实际只是"没有硬伤"。**这个读数就是把两者分开。**
-    _hits, _miss = [], []
-    for _k, _t in THRESHOLDS.items():
-        _v = r.get(_k)
-        if not isinstance(_v, (int, float)) or isinstance(_v, bool):
-            continue
-        _m = re.search(r'([0-9.]+)\s*[–—\-]\s*([0-9.]+)', str(_t.get('humans', '')))
-        if not _m:
-            continue
-        _lo2, _hi2 = float(_m.group(1)), float(_m.group(2))
-        if _lo2 <= _v <= _hi2:
-            _hits.append(_k)
-        else:
-            _miss.append((_t['desc'], _v, _lo2, _hi2))
+    # ★ 2026-10-07：判据统一走 `_hit_stats()` —— 单章报告与项目级体检
+    # 必须用**同一套**判据，否则两处的"命中率"会各算一套（那又是双载体漂移）。
+    _hits, _miss, _low0, _high0 = _hit_stats(r)
     _tot = len(_hits) + len(_miss)
     if _tot:
         _pct = 100 * len(_hits) / _tot
@@ -487,10 +672,9 @@ def report(name, r, as_json=False):
         elif _pct < _hit_soft:
             warns += 1
         if _pct < _hit_soft:
-            _low = [x for x in _miss if x[1] < x[2]]
-            _high = [x for x in _miss if x[1] > x[3]]
+            _low, _high = list(_low0), list(_high0)
             print('  ⚠ **全绿 ≠ 在人类区间内** —— 这一章整体偏离人类区间：')
-            for _d, _v, _lo2, _hi2 in _miss[:6]:
+            for _k2, _d, _v, _lo2, _hi2 in _miss[:6]:
                 _dir2 = '低于' if _v < _lo2 else '高于'
                 print(f'      · {_d} = {_v}（{_dir2}人类 {_lo2}–{_hi2}）')
             if len(_miss) > 6:
@@ -498,8 +682,22 @@ def report(name, r, as_json=False):
             if len(_low) > len(_high):
                 print('  → 多数偏低 = **欠写**：句子太短／动作与身体细节缺失／完整发言不足。'
                       '别只盯着"没超标"，要看"该有的有没有"。')
+                # ★ 从"读数"变成"行动"（2026-10-07）：只报数字不给动作的报告，
+                #   等于什么都没说——这是本轮诊断里"报告念了、没人改"的直接修法。
+                print('  ★ **补足清单（照它改，不要照"超标项"改）**：')
+                # 按**偏差幅度**排序：先改偏得最狠的那项，别按指标表顺序。
+                _low.sort(key=lambda x: (x[3] - x[2]) / max(x[3], 1e-9), reverse=True)
+                for _k3, _d3, _v3, _lo3, _hi3 in _low[:5]:
+                    _hint = _FIX_HINT.get(_k3)
+                    if _hint:
+                        print(f'      · {_d3} = {_v3}（人类 {_lo3}–{_hi3}）')
+                        print(f'        → {_hint}')
+                print('  ⚠ **顺序要紧：先补足，再压住。** 反过来做（先删超标项）会把文章越改越干——'
+                      '补足会自然把句长／引号／情绪配比带回来，而压住不会。')
             elif len(_high) > len(_low):
                 print('  → 多数偏高 = **配额拉满**：等于把目标值当起了上限，读起来用力过猛。')
+                print('  ★ 修正方向：把"上限"当护栏而不是目标——**低于上限不等于不合格**。'
+                      '见 `execution-contract.md` 的 `indicator-waived`。')
 
     # ══════════ author_presence 的子项地板（2026-09-19 新增）══════════
     # **为什么加**：`author_presence` 是复合分（评价词×1 + 口语×3 + 吐槽×3 + 语气词×1
@@ -543,6 +741,9 @@ def main():
     ap.add_argument('--all', action='store_true', help='目录下所有 第*.md')
     ap.add_argument('--json', action='store_true', help='机器可读输出')
     ap.add_argument('--baseline', action='store_true', help='把该文件当作人类样本，打印其基线值')
+    ap.add_argument('--project', action='store_true',
+                    help='★ 项目级人味体检：汇总全部章节（命中率曲线 + 系统性偏低/偏高 + 结论），'
+                         '不逐章打印。用法：check_human_rhythm.py <项目目录> --all --project')
     args = ap.parse_args()
 
     p = Path(args.path)
@@ -564,6 +765,9 @@ def main():
     if not files:
         print('[错误] 未找到章节文件')
         sys.exit(2)
+
+    if args.project:
+        sys.exit(project_summary(files))
 
     results, total_fail = [], 0
     for f in files:

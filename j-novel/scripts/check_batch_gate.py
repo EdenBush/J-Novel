@@ -20,6 +20,14 @@
     3. 质检痕迹 —— 04-质检档案.md 每章是否有记录
     4. 台账推进 —— 03/05 台账是否推进到已完成末章
     5. 章节边界 —— 上章结尾钩子人物，本章开头是否接住
+    6. 字段级（L2）—— 台账的 retryCount 有值；本批已写完的章都定了「实物清单」（≥3 项）、
+       都出了「剧情卡」（含 `本章钩子` / `要说清的事` 字段 + 头部 `共创状态：`）
+
+⚠️ 第 6 项里的「实物清单」只查**有没有定、够不够 3 项**（事实，可判定）；
+   它**不查兑现率**——"清单里的物在正文用了几项"由 `check_contract.py` 的
+   `check_concrete_coverage` **只提示、不阻塞**（那一层没有人类基线）。
+⚠️ 「剧情卡」同样只查**产出与字段**，**绝不查"作者改了几处"**（不可校验，且一旦
+   做成闸门就会逼出"表演式修改"）——详见 `plot_card_missing` 处的注释。
 
 用法:
     python check_batch_gate.py <项目目录>
@@ -41,10 +49,86 @@ ensure_utf8_stdio()
 _CJK = re.compile(r'[\u4e00-\u9fff]')
 _ENCODINGS = ('utf-8', 'gb18030', 'gbk', 'utf-16', 'big5')
 
+# ── 实物清单（本体层 / 具体性闸门，v7.0.0 新增）──────────────────────
+# 落盘位置是**接口契约**（跨 agent 共享，不许改）：
+#   `chapters/_meta/第XX章-<标题>.meta.md` 的「## 实物清单」段。
+# ⚠️ **绝不能放进正文文件** `chapters/第XX章-<标题>.md` —— 2026-09-19 已确立
+#   "正文文件严禁任何工程字段"（真人盲评里两位评委各自把外挂的元数据头部列为最强 AI
+#   指纹）。`_meta/` 文件才是工程字段的合法容器。
+# ★ 2026-10-09 v7.1.1：`CONCRETE_HEAD` / `find_meta_file` / `parse_concrete_list` /
+#   `CHAPTER_DIRS` / `META_NO_RX` 已**收归 `_shared`**（此前 `parse_concrete_list` 3 份、
+#   `find_meta_file` 2 份、`CHAPTER_DIRS` 4 份）。这里只留本闸门专有的下限。
+CONCRETE_MIN_ITEMS = 3      # 清单 3–8 项，3 是下限（见 guides/specificity-gate.md 第二节）
+
+# ── 剧情卡（剧情共创层，v7.1.0 新增）────────────────────────────────
+# 落盘位置是**接口契约**（跨 agent 共享，不许改）：
+#   `细纲/剧情卡-第NN-NN章.md` —— 每批一份，章号两位补零（如 `剧情卡-第06-10章.md`）。
+# 它是**细纲展开之前**与作者一起磨剧情的产物，说明书见 `guides/plot-co-creation.md`。
+# 为什么需要校验点：剧情（"第 N 章发生什么、这一章的钩子是哪件事"）此前**唯一的入口**
+#   是剧情脚手架，而它被标成【可选】→ 实测 29 本有 AI 大纲的真实项目里**只有 2 本**
+#   产出过（≈ 7%）→ 默认路径变成"AI 按通用节奏推导 + 让作者确认"。
+PLOT_CARD_DIR = '细纲'
+PLOT_CARD_GLOB = '剧情卡-*.md'
+PLOT_STATUS_HEAD = '共创状态：'          # 钉死的字段名（人看的形态）
+# ⚠️ 判据要覆盖同一含义的多种写法：半角冒号也算（写手/作者都可能打出来）。
+PLOT_STATUS_RX = re.compile(r'共创状态\s*[:：]')
+# ⚠️ 字段名逐字钉死（`guides/plot-co-creation.md` 3.3：「字段名一个字都不许改」），
+#    但**星号只锁开头**：
+#    `**本章钩子**（已选定）：` 与 `**本章钩子**：` 都要认 —— 锁太死会把合规卡判死。
+PLOT_FIELD_HOOK = re.compile(r'\*\*\s*本章钩子')
+PLOT_FIELD_MUST = re.compile(r'\*\*\s*要说清的事')
+# 章号兼容 `第 6 章` / `第 06 章` / `第001章` 三种写法（本项目的既有口径：见 `_shared.META_NO_RX`）。
+# ⚠️ 必须落在**标题行**（`## 第 NN 章`）上——否则会命中卡片标题「# 剧情卡 · 第 06–10 章」
+#    这类正文里的引用（本项目已有两次"断言命中无关文本"的事故）。
+PLOT_NO_RX = re.compile(r'(?m)^#{1,6}\s*第\s*0*(\d{1,4})\s*章')
+
+# ── 改写方案表（改写工程，v7.2.0 新增）──────────────────────────────
+# 落盘位置是**接口契约**（跨 agent 共享，不许改）：
+#   `chapters/_meta/第NN章-改写方案.md` —— 格式与字段名见 `guides/rewrite-units.md` 第四节。
+# **为什么需要这个校验点**：这是"生成点有了、交付点有了、校验点没有"的**第 4 次**
+#   （v6.8.0 `retryCount` → v7.0.0 实物清单 → v7.1.0 剧情卡 → 本次）：
+#     生成点：改写工序要求"**改前先出方案表** + 改后做三行对照"（phase3 清单 5 / SKILL.md 动作 7）
+#     交付点：改写任务包（`--rewrite`）会把它当输入
+#     校验点：**此前没有** —— 于是"出了表"和"没出表"过闸门的结果完全一样。
+REWRITE_PLAN_TAG = '改写方案'
+PLAN_TITLE_RX = re.compile(r'(?m)^#{1,6}[^\n]*' + REWRITE_PLAN_TAG)
+# 表头列名**逐字钉死**，但**只允许列间距不同**（`rewrite-units.md` 第四节的原文要求）：
+#   所以判据是"按 `|` 切、逐格 strip 掉空白与星号之后，与这 6 个名字逐字相同"，
+#   **不是**"这几个词在文件里出现过"（前者是格式校验，后者命中一句注释就为绿）。
+PLAN_HEAD_CELLS = ('#', '缺陷项', '单元', '定位', '改成什么', '会影响')
+# 三行对照的字段名。⚠️ 字段名一字不许改，但**半角/全角冒号都要认**
+#   （写手可能打 `改前:`）—— 与剧情卡 `共创状态：` 的既有口径一致。
+PLAN_FIELD_BEFORE = re.compile(r'改前\s*[:：](.*)')
+PLAN_FIELD_AFTER = re.compile(r'改后\s*[:：](.*)')
+PLAN_FIELD_WHY = re.compile(r'为什么更好\s*[:：](.*)')
+# 六个改写单元是**接口契约**（跨 agent 共享，一个字都不许改）。
+REWRITE_UNITS = ('U1', 'U2', 'U3', 'U4', 'U5', 'U6')
+_UNIT_TOKEN_RX = re.compile(r'U[A-Za-z0-9]+')
+# 「改前 ≠ 改后」的归一化口径：**只保留汉字/字母/数字**，其余（空白、标点、
+# markdown 装饰符）**全部丢掉再比**。
+# 为什么定这么严（这一层是本闸门最容易做成形式主义的地方）：
+#   ① 直接比原文 → "改后"把"改前"抄一遍照样过 —— 那正是要拦的**空改**；
+#   ② 只去空格 → **只改标点也算改动**（`。` → `，`、句末补个引号），而标点不是内容；
+#   ③ 所以判据是"**换成内容层面的字符之后，还一样不一样**"。
+# ⚠️ 这一层**永远判不了"改得好不好"** —— 它只回答"**到底改了没有**"。
+_NORM_KEEP_RX = re.compile(r'[^\u4e00-\u9fff\u3400-\u4dbfA-Za-z0-9]+')
+
+# ── 章节工单（返工轮次的**可靠触发源**，v7.2.0 新增）────────────────
+# `06-章节工单.md` 由 `make_workorder.py --archive` **机器写入**（每章一行，
+#   列：章节 | 字数 | 机械结论 | 缺陷类型 | 返工轮次 | 备注）。
+# `05-创作台账.md` 的 `retryCount` **只有当前章**，答不出"历史上哪几章返工过"
+#   —— 所以它做不了这个触发源。
+WORKORDER_FILE = '06-章节工单.md'
+WORKORDER_RETRY_HEAD = '返工轮次'
+
 # 共享层（唯一真相源）：read_text / parse_waivers / find_chapter_files
+#   + 实物清单（2026-10-09 v7.1.1 收归）：find_meta_file / parse_concrete_list / CONCRETE_HEAD
+#   + 章节目录名与章号正则（CHAPTER_DIRS / META_DIR / META_NO_RX）
 import os as _os
 sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-from _shared import read_text as _shared_read_text, parse_waivers  # noqa: E402
+from _shared import (CHAPTER_DIRS, CONCRETE_HEAD, META_DIR, META_NO_RX,  # noqa: E402
+                     find_meta_file, parse_concrete_list,
+                     parse_waivers, read_text as _shared_read_text)
 
 
 def read_text(path: Path) -> str:
@@ -71,6 +155,242 @@ def read_json(path: Path):
         except Exception:
             continue
     raise ValueError(f'JSON 解析失败（已试 utf-8-sig / utf-8）：{path}')
+
+
+def find_plot_cards(root: Path):
+    """收集全部剧情卡 —— `细纲/剧情卡-*.md`（每批一份）。
+
+    目录名与 `guides/plot-co-creation.md` 7.1 的接口契约一致；
+    结构不规范的老项目兜底到全库 rglob（与 `find_meta_file` 同款兜底）。
+    """
+    cands = list((root / PLOT_CARD_DIR).glob(PLOT_CARD_GLOB))
+    if not cands:
+        cands = list(root.rglob(PLOT_CARD_GLOB))
+    return sorted(set(cands))
+
+
+def parse_plot_card(text: str):
+    """解析一张剧情卡 → `(头部文本, {章号: 该章段文本})`。
+
+    定位 `## 第 NN 章` 标题行 → 该章段取到**下一个章标题或文件结束**为止。
+    章号兼容 `第 6 章` / `第 06 章` / `第001章`（同一含义的多种写法都要认）。
+
+    ⚠️ 同一章号出现多次时，段落**累加**而不是覆盖 —— 判据是
+    **"有没有一处合规"**，不是"某个位置恰好合规"（本项目踩过两次"命中注释"的坑）。
+    """
+    hits = list(PLOT_NO_RX.finditer(text))
+    head = text[:hits[0].start()] if hits else text
+    segs = {}
+    for i, m in enumerate(hits):
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(text)
+        n = int(m.group(1))
+        segs[n] = segs.get(n, '') + text[m.start():end]
+    return head, segs
+
+
+# ══════════════════════════════════════════════════════════════════
+# 改写方案表（v7.2.0）—— 解析与校验
+# ══════════════════════════════════════════════════════════════════
+
+def _split_md_row(line: str) -> list:
+    """把一行 markdown 表格切成单元格：去首尾 `|`、逐格 strip 空白与 `*`。"""
+    return [c.strip().strip('*').strip() for c in line.strip().strip('|').split('|')]
+
+
+def find_rewrite_plans(root: Path) -> list:
+    """收集全部改写方案表 —— `<章节目录>/_meta/*改写方案*.md`。
+
+    目录名与 `find_chapter_files` 同口径（`chapters` / `正文` / `章节目录`），
+    结构不规范的老项目兜底到全库 rglob。
+    ⚠️ 过滤条件是"**文件名里含「改写方案」**"，不是精确等于 `第NN章-改写方案.md` ——
+    名字多一个后缀（`-第01章-改写方案.md`）就**看不见**，正是本项目复发过三次的
+    "该有的东西静默消失"。
+    """
+    cands = []
+    for d in CHAPTER_DIRS:
+        sub = root / d / META_DIR
+        if sub.is_dir():
+            cands += [p for p in sub.glob('*.md') if REWRITE_PLAN_TAG in p.name]
+    if not cands:                                   # 老项目结构不规范时的兜底
+        cands = [p for p in root.rglob('*.md') if REWRITE_PLAN_TAG in p.name]
+    return sorted(set(cands))
+
+
+def find_rewrite_plan(root: Path, chapter_no: int):
+    """找本章的改写方案表。返回 Path；找不到返回 None。
+
+    章号认 `第 6 章` / `第 06 章` / `第001章` 三种写法（复用 `_shared.META_NO_RX`，
+    与`find_meta_file` / `PLOT_NO_RX` 同口径）。
+    """
+    for p in find_rewrite_plans(root):
+        m = META_NO_RX.search(p.name)
+        if m and int(m.group(1)) == chapter_no:
+            return p
+    return None
+
+
+def find_plan_header(text: str):
+    """找方案表的**表头行** → `(行号, 单元格列表)`；找不到返回 `(-1, [])`。
+
+    判据：按 `|` 切开、逐格 strip 之后与 `PLAN_HEAD_CELLS` **逐字且逐列相同**
+    （列数也必须一致）——**只允许列间距不同**。
+    ⚠️ 不用 `in` / 不用子串：那会命中"补法提示里的那一行格式示例"（本项目踩过两次）。
+    """
+    for i, line in enumerate(text.split('\n')):
+        if not line.strip().startswith('|'):
+            continue
+        cells = _split_md_row(line)
+        if cells == list(PLAN_HEAD_CELLS):
+            return i, cells
+    return -1, []
+
+
+def find_unknown_units(text: str, header_cells: list) -> list:
+    """在「单元」列里找出**不在 U1–U6 之内**的编号。
+
+    **只查这一件事**：编号是不是契约里的那六个。
+    不查"这个单元选得对不对"（U5 被当成 U1 用？）——那是**理解级判断**，
+    机器判不了（`rewrite-units.md` 4.3 的同一原则），交独立质检子代理。
+    """
+    if not header_cells:
+        return []
+    try:
+        idx = header_cells.index('单元')
+    except ValueError:
+        return []
+    bad = []
+    for i, line in enumerate(text.split('\n')):
+        if not line.strip().startswith('|'):
+            continue
+        cells = _split_md_row(line)
+        if cells == list(header_cells):                     # 表头行本身
+            continue
+        if all(set(c) <= set('-: ') for c in cells):        # `|---|---|` 分隔行
+            continue
+        if idx >= len(cells):
+            continue
+        for tok in _UNIT_TOKEN_RX.findall(cells[idx]):
+            if tok.upper() not in REWRITE_UNITS:
+                bad.append(tok)
+    return bad
+
+
+def parse_rewrite_pairs(text: str) -> list:
+    """抽出所有「改前 → 改后 → 为什么更好」**三行齐全**的对照块 → `[(改前, 改后)]`。
+
+    三行的**顺序必须是 改前 → 改后 → 为什么更好**（`rewrite-units.md` 4.1 的格式）。
+    三行不齐的**不算一个块** —— 判据是"**有没有一处合规**"，不是"三个词出现过没有"。
+    """
+    out = []
+    for mb in PLAN_FIELD_BEFORE.finditer(text):
+        ma = PLAN_FIELD_AFTER.search(text, mb.end())
+        if not ma:
+            continue
+        mw = PLAN_FIELD_WHY.search(text, ma.end())
+        if not mw:
+            continue
+        out.append((mb.group(1).strip(), ma.group(1).strip()))
+    return out
+
+
+def check_rewrite_plan(text: str) -> list:
+    """校验一份改写方案表 → 返回问题列表（空 = 合规）。
+
+    **五条判据全是"文件级事实"**，没有一条依赖判断 —— 所以敢做成硬失败：
+      ① 标题行含「改写方案」
+      ② 表头行 6 列逐字对上（允许列间距不同）
+      ③ 至少一处三行对照齐全（`改前：` + `改后：` + `为什么更好：`）
+      ④ 至少一处「改前 ≠ 改后」（归一化后比 = **防空改**）
+      ⑤「单元」列里出现的编号落在 U1–U6 之内
+    """
+    issues = []
+    if not PLAN_TITLE_RX.search(text):
+        issues.append('标题行不含「改写方案」')
+
+    _hi, _hc = find_plan_header(text)
+    if _hi < 0:
+        issues.append('缺表头行 `| # | 缺陷项 | 单元 | 定位 | 改成什么 | 会影响 |`')
+
+    # 哪个字段整份文件里都没有 —— 报的是"**缺字段**"，与"没有文件"是两件事
+    # （用例 86 的注入 B 专门断言这一点：它反证解析器**认得出**这个文件）。
+    _miss = [name for name, rx in
+             (('改前', PLAN_FIELD_BEFORE), ('改后', PLAN_FIELD_AFTER),
+              ('为什么更好', PLAN_FIELD_WHY))
+             if not rx.search(text)]
+    for _name in _miss:
+        issues.append(f'缺「{_name}：」字段')
+
+    _pairs = parse_rewrite_pairs(text)
+    if not _pairs:
+        issues.append('没有一处「改前：/改后：/为什么更好：」三行齐全的对照块')
+    elif not any(_NORM_KEEP_RX.sub('', a) != _NORM_KEEP_RX.sub('', b)
+                 for a, b in _pairs):
+        # 归一化后全部相同 = **改了个空**（抄了一遍）。这是最容易发生的假工作。
+        issues.append('所有对照块的「改前」与「改后」归一化后完全相同'
+                      '（防空改：改前必须 ≠ 改后）')
+
+    _bad_units = find_unknown_units(text, _hc)
+    if _bad_units:
+        issues.append('「单元」列出现未知单元 %s（只认 U1–U6）'
+                      % '、'.join(sorted(set(_bad_units))))
+    return issues
+
+
+def parse_reworked_chapters(root: Path):
+    """从 `06-章节工单.md` 读「**哪几章返工过**」→ `(set, 跳过原因)`。
+
+    为什么用**工单**而不是 `05-创作台账.md`：
+      · 工单是 `make_workorder.py --archive` **机器写入**的，**每章一行**、字段固定；
+      · 台账的 `retryCount` **只有当前章**，答不出"历史上哪几章返工过"。
+    ⚠️ **但它只够做软提示，不够做硬闸门**：`--retry` 的默认值是 0，
+      **"没填"与"真的是 0"在工单里长得一样** → 这个源**有漏报**（重新归档时忘了
+      填 `--retry`），只是几乎没有误报。**有漏报的判据不许当硬闸门**（那就是造假闸门）。
+    ⚠️ **取不到就降级 + 留痕**（v7.1.1 立的规矩：跳过必须留痕）：返回的第二个值是
+      降级理由，调用方必须把它打进报告 —— 静默跳过正是本 SKILL 最忌讳的那种失败。
+      代价如实写清：**本批次失去"边改边测"的提示**，只保留方案表的格式校验。
+    """
+    p = root / WORKORDER_FILE
+    if not p.exists():
+        return set(), (
+            f'找不到 `{WORKORDER_FILE}`（`make_workorder.py --archive` 每章质检时写入）'
+            f'→ **无法判定哪几章返工过**，改写方案表的软提示**降级为"只在方案表存在时'
+            f'做格式校验"**。代价：边改边测（打地鼠）的章不会被提示。'
+            f'（硬层不受影响 —— 它只依赖方案表本身在不在、字段全不全。）')
+
+    rows, idx_retry = [], None
+    for line in read_text(p).split('\n'):
+        s = line.strip()
+        if not s.startswith('|'):
+            continue
+        cells = _split_md_row(line)
+        if idx_retry is None and any(WORKORDER_RETRY_HEAD in c for c in cells):
+            idx_retry = next(i for i, c in enumerate(cells) if WORKORDER_RETRY_HEAD in c)
+            continue                                    # 表头行，不是数据
+        rows.append(cells)
+
+    if idx_retry is None:
+        return set(), (
+            f'`{WORKORDER_FILE}` 里找不到「{WORKORDER_RETRY_HEAD}」列 → 同上，'
+            f'软提示降级为"只在方案表存在时做格式校验"（代价相同）。')
+
+    if not rows:
+        return set(), (f'`{WORKORDER_FILE}` 里没有可解析的工单行 → 同上，'
+                       f'软提示降级为"只在方案表存在时做格式校验"（代价相同）。')
+
+    out = set()
+    for cells in rows:
+        if idx_retry >= len(cells):
+            continue
+        m = META_NO_RX.search(cells[0])
+        if not m:
+            continue
+        try:
+            _r = int(cells[idx_retry])
+        except (TypeError, ValueError):
+            continue                                    # 空值/非数字 → 看不出返工过，跳过
+        if _r >= 1:
+            out.add(int(m.group(1)))
+    return out, ''
 
 
 def main():
@@ -205,6 +525,11 @@ def main():
     state_path = root / '03-状态台账.md'
     ledger_lag = []
     ledger_field_missing = []   # ★ L2 字段级校验（2026-10-02 新增）
+    concrete_list_missing = []  # ★ L2 字段级校验：实物清单（2026-10-07 v7.0.0 新增）
+    plot_card_missing = []      # ★ L2 字段级校验：剧情卡（2026-10-09 v7.1.0 新增）
+    rewrite_plan_bad = []       # ★ L2 字段级校验：改写方案表格式（2026-10-09 v7.2.0 新增）
+    _no_plan_rework = []        # ★ 软提示：返工过却没出方案表（同上，不阻塞）
+    _wo_skip_note = ''          # ★ 软层降级留痕（找不到工单时非空；见 parse_reworked_chapters）
     soft_hints = []             # 软提示（不阻塞）
     if completed:
         last = max(completed)
@@ -235,6 +560,155 @@ def main():
             ledger_field_missing.append(
                 '05-创作台账 缺 `retryCount`（返工轮次）字段或值 —— 它是「一次合格率」的唯一数据源。'
                 '模板见 guides/creation-ledger.md，格式：`本章返工轮次（retryCount）：0`')
+
+        # ══ 实物清单（v7.0.0 新增）════════════════════════════════
+        # **为什么加这一条**：与 `retryCount` 是同一个病 —— "生成点有了、交付点有了、
+        #   校验点没有"。实物清单是本体层（"这一章里的东西是不是只属于这本书"）唯一的产出物：
+        #     生成点：`chapters/_meta/<章名>.meta.md` 的「## 实物清单」段（动笔前定，3–8 项）
+        #     交付点：任务包 `concrete_list` 槽位（make_task_package 抽不到就 TODO → 拒绝开工）
+        #     校验点：**此前没有** —— 于是"没定清单"和"定了清单"过闸门的结果完全一样。
+        #   17 项频率指标全绿也看不出这个洞（见 guides/specificity-gate.md 第一节）。
+        #
+        # 判据（**事实级**，可判定，所以敢做成硬失败）：
+        #   ① 有本章的 `*.meta.md`；② 里面有 `## 实物清单` 段；③ 段里 ≥3 个列表项。
+        # ⚠️ **兑现率（清单写了 5 项、正文用了几项）不在这里查**：那需要人类基线，
+        #    而且脚本判断不了清单本身好不好 → 由 `check_contract.check_concrete_coverage`
+        #    只提示、不阻塞。**硬闸门只查"有没有定"，不查"定的好不好"。**
+        # ⚠️ 只扫**本批次窗口内已经写完的章**（`completed`），窗口外 / 还没写的章一律不牵连：
+        #    旧项目（v7.0.0 之前）根本没有 `_meta/` 目录，但它本批次没有新完成的章就一条都不报。
+        #    **新必填字段不追溯旧稿**——这是兼容性设计，不是漏网。
+        for _n in completed:
+            _mp = find_meta_file(root, _n)
+            if _mp is None:
+                concrete_list_missing.append(
+                    f'第 {_n} 章：`chapters/_meta/` 下找不到本章的 `*.meta.md`')
+                continue
+            _items = parse_concrete_list(read_text(_mp))
+            if not _items:
+                concrete_list_missing.append(
+                    f'第 {_n} 章：{_mp.name} 里没有「## {CONCRETE_HEAD}」段，或一个条目都没有')
+            elif len(_items) < CONCRETE_MIN_ITEMS:
+                concrete_list_missing.append(
+                    f'第 {_n} 章：{_mp.name} 的实物清单只有 {len(_items)} 项'
+                    f'（下限 {CONCRETE_MIN_ITEMS} 项）')
+
+        # ══ 剧情卡（v7.1.0 新增）════════════════════════════════════
+        # **为什么加这一条**：与 `retryCount`／实物清单是**同一个病的第三次** ——
+        #   "生成点有了、交付点有了、校验点没有"。
+        #   剧情（"第 N 章发生什么、这一章的钩子是哪件事"）此前**唯一的入口**是
+        #   `plot-scaffold.md` 的剧情脚手架，而它被标成【可选】→ 实测 29 本有 AI 大纲的
+        #   真实项目里**只有 2 本**产出过（≈ 7%）→ **默认路径**变成
+        #   "AI 按通用节奏推导大纲 + 让作者【确认】"。
+        #   而"确认"是二元的（点头/不点头），中间没有颗粒度 —— 用户的原话是
+        #   "让 AI 自己发挥构造剧情框架，写出来的东西不太好"。
+        # 修法（流程侧）：每批细纲展开**之前**先出剧情卡（每章 3–5 行：钩子 + 要点）
+        #   → 跟作者磨 → 磨完才展开成完整细纲。本函数是那条链的**校验点**。
+        #
+        # 判据（**只查存在性与字段**，可判定，所以敢做成硬失败）：
+        #   ① `细纲/剧情卡-*.md` 里有一张卡，其章段集合含本章号
+        #      （兼容 `第 6 章`／`第 06 章`／`第001章`）
+        #   ② 该卡**文件头**含 `共创状态：` 行
+        #   ③ 该章段含 `**本章钩子**` 与 `**要说清的事**` 两个字段
+        #
+        # ⚠️⚠️ **绝不能加的一条判据：作者改了几处。**
+        #   ① 它**不可校验**——"他改了几处"没有任何可机械判定的形态；
+        #   ② 更严重的是，**一旦把它做成闸门，主 Agent 为了过检就会去逼作者改东西**：
+        #      那是**表演式修改**（作者随手改两个字好让闸门变绿），**比没磨更糟**——
+        #      它污染了"哪些是作者的品味"这条唯一的对账基准。
+        #   所以判据**只停在两件"动作"上：卡有没有产出 / 问过没**。
+        #   （`guides/plot-co-creation.md` 7.3 把这一条写成"明确不设判据"，这里是它的代码侧。）
+        #
+        # ⚠️ 由此直接推出：**`共创状态：作者未回应（YYYY-MM-DD）` 必须照常放行**，
+        #   它与"已与作者确认"在留痕上**等价**。理由：**"问了、作者没回、不阻塞"
+        #   是设计内的合法结果**——节流档 / 推荐档的"不问"批次用"一次性告知"
+        #   （`共创状态：未确认·一次性告知`），推荐档其余批次问完就往下走、
+        #   把没回的记进 `未回应项：`（`plot-co-creation.md` 4.4 / 5.3 / 第六节）。
+        #   把它拦下的后果**不是"质量下降"，而是主 Agent 转身去骚扰作者**——
+        #   正是本轮要防的那件事。（用例 81 是这条的护栏：谁把判据加严它会立刻报警。）
+        # ⚠️ 只扫**本批次窗口内已经写完的章**（`completed`）——窗口外 / 旧项目一律不牵连，
+        #   与上面实物清单同口径（新必填字段**不追溯旧稿**，是兼容性设计不是漏网）。
+        _card_idx = {}
+        for _cp in find_plot_cards(root):
+            _chead, _csegs = parse_plot_card(read_text(_cp))
+            for _cn, _cseg in _csegs.items():
+                _card_idx.setdefault(_cn, []).append((_cp, _chead, _cseg))
+        for _n in completed:
+            _ents = _card_idx.get(_n)
+            if not _ents:
+                plot_card_missing.append(
+                    f'第 {_n} 章：`{PLOT_CARD_DIR}/` 下没有剧情卡含「## 第 {_n} 章」段'
+                    f'（期望 {PLOT_CARD_DIR}/剧情卡-第XX-XX章.md）')
+                continue
+            # 存在性判据问"**有没有一处合规**"：任一卡的头部与字段都齐 → 通过。
+            # （同章号被多张卡重复覆盖是允许的，取合规的那一张。）
+            _fails = []
+            for _cp, _chead, _cseg in _ents:
+                _miss = []
+                if not PLOT_STATUS_RX.search(_chead):
+                    _miss.append(f'文件头没有 `{PLOT_STATUS_HEAD}` 行')
+                if not PLOT_FIELD_HOOK.search(_cseg):
+                    _miss.append('本章段缺 `**本章钩子**` 字段')
+                if not PLOT_FIELD_MUST.search(_cseg):
+                    _miss.append('本章段缺 `**要说清的事**` 字段')
+                if not _miss:
+                    _fails = []
+                    break
+                _fails.append(f'{_cp.name}：' + '、'.join(_miss))
+            if _fails:
+                plot_card_missing.append(f'第 {_n} 章：' + '；'.join(_fails))
+
+        # ══ 改写方案表（改写工程，v7.2.0 新增）════════════════════════════
+        # **判据分两层，两层的性质完全不同** —— 分层的理由就是本 SKILL 的铁律
+        # "**能机器验的只有两件：① 文件/字段在不在 ② 改前 ≠ 改后**"：
+        #
+        # ▸ **硬层（可判定 → 敢做成硬失败）**：方案表**存在**时，必须
+        #     ① 标题行含「改写方案」② 表头 6 列逐字对上（允许列间距不同）
+        #     ③ 至少一处三行对照齐全 ④ 至少一处「改前 ≠ 改后」（防空改）
+        #     ⑤「单元」列里出现的编号落在 U1–U6
+        #   五条全是**文件级事实**（东西在不在 / 格子填没填 / 字符串一样不一样 /
+        #   编号在不在契约里），没有一条依赖"判断"，所以硬失败是站得住的。
+        #
+        # ▸ **软层（宁可不做，也不造一个"看起来在工作的闸门"）**：以下三件事
+        #   **机器判不了，所以一条判据都不写**，交独立质检子代理 / 人：
+        #     ·「为什么更好」是否**具体** —— `rewrite-units.md` 4.3 已论证它是
+        #       理解级判断（与 v6.9.0「闲笔密度」是同一次失败教训）→ **宁可承认测不了**
+        #     · 单元**选得对不对**（把 U5 当 U1 用？）
+        #     · 方案表的**顺序**对不对（先粗后细）
+        #   ⚠️ **不许写正则去猜这三件事**：猜出来的判据会逼出"**表演式改写**"
+        #      （把理由写得像样、单元编号填对，而文本一点没变好）——那**比没有闸门更糟**。
+        #
+        # ▸ **软提示（不阻塞）**：**返工过却没有方案表** → 说明这一章是**边改边测**
+        #   （打地鼠）而不是"先出方案、再一次改完"。触发源 = `06-章节工单.md` 的
+        #   「返工轮次」（机器写的、每章一行）。**它有漏报**（`--retry` 默认 0，
+        #   "没填"与"真的是 0"长得一样）→ **只能做软提示，不许当硬闸门**。
+        #   取不到工单 → **降级 + 留痕**（降级理由与代价由 `parse_reworked_chapters` 给出，
+        #   见该函数的 docstring；v7.1.1 立的规矩：**跳过必须留痕**）。
+        # ⚠️ 只扫**本批次窗口内已经写完的章**（`completed`），与上面两条 L2 校验同口径：
+        #   窗口外 / 旧项目一律不牵连（新必填字段**不追溯旧稿**）。
+        for _n in completed:
+            _pp = find_rewrite_plan(root, _n)
+            if _pp is None:
+                continue                    # 不存在 → 硬层不判（交给下面那条软提示）
+            _plan_issues = check_rewrite_plan(read_text(_pp))
+            if _plan_issues:
+                rewrite_plan_bad.append(
+                    f'第 {_n} 章：{_pp.name} —— ' + '；'.join(_plan_issues))
+
+        _reworked, _wo_skip = parse_reworked_chapters(root)
+        _wo_skip_note = _wo_skip
+        if _wo_skip:
+            soft_hints.append(_wo_skip)     # ★ 跳过必须留痕（v7.1.1）
+        else:
+            _no_plan_rework[:] = [x for x in sorted(_reworked & set(completed))
+                                  if find_rewrite_plan(root, x) is None]
+            if _no_plan_rework:
+                soft_hints.append(
+                    '第 %s 章：`%s` 里记着**返工过**（返工轮次 ≥1），本章却**没有'
+                    '改写方案表**（`chapters/_meta/第NN章-%s.md`）—— 返工过 = 这一章'
+                    '被改过；没有方案表 = 是**边改边测**（打地鼠），不是**先出方案、'
+                    '再一次改完**。下轮起先落方案表再动手。'
+                    % ('、'.join(str(x) for x in _no_plan_rework), WORKORDER_FILE,
+                       REWRITE_PLAN_TAG))
 
         # 软提示：对话专项列（2026-10-02 随对话体系新增；给存量项目留过渡，不阻塞）
         _arc = root / '04-质检档案.md'
@@ -381,6 +855,55 @@ def main():
         blockers.append('【台账未推进】' + '；'.join(ledger_lag))
     if ledger_field_missing:
         blockers.append('【台账缺字段】' + '；'.join(ledger_field_missing))
+    if concrete_list_missing:
+        blockers.append(
+            '【实物清单缺失】实物清单是**动笔前**必须定的（`guides/specificity-gate.md` 第二节），'
+            '定义见任务包 `concrete_list` 槽位：\n'
+            + '\n'.join('      · ' + _c for _c in concrete_list_missing) +
+            '\n      → 它是本体层（"这一章的东西是不是只属于这本书"）唯一的产出物；'
+            '没定清单 = 这一章没有只属于它的东西，而 17 项频率指标全绿也看不出来。\n'
+            '      → 补法：在 `chapters/_meta/第XX章-<标题>.meta.md` 里加一段\n'
+            '           `## 实物清单（本章 3–8 项：只属于这一章的东西）`\n'
+            '         下面每行一项，形如 `- 半包受潮的火柴`（只写物，不写解释）。\n'
+            '      → 落盘位置是接口契约：**绝不能写进正文文件**（正文严禁任何工程字段）。'
+        )
+    if plot_card_missing:
+        blockers.append(
+            '【剧情卡缺失】剧情卡是**动笔前与作者一起磨的产物**'
+            '（`guides/plot-co-creation.md`），必须站在**细纲展开之前**：\n'
+            + '\n'.join('      · ' + _p for _p in plot_card_missing) +
+            '\n      → 没有它，细纲只能按 AI 推的通用节奏展开 —— 那正是要消灭的默认路径'
+            '（实测 29 本有 AI 大纲的项目里只有 2 本产出过剧情脚手架 ≈ 7%）。\n'
+            '      → 补法：落盘 `细纲/剧情卡-第NN-NN章.md`（每批一份，章号两位补零，'
+            '如 `细纲/剧情卡-第06-10章.md`），最小格式：\n'
+            '           `# 剧情卡 · 第 06–10 章`\n'
+            '           `> 共创状态：已与作者确认（YYYY-MM-DD）｜档位：推荐档`\n'
+            '           `> 作者改动：无｜未回应项：无`\n'
+            '           `## 第 06 章：<章名>`\n'
+            '           `- **本章钩子**（已选定）：<这一章的钩子是"哪件事">`\n'
+            '           `- **要说清的事**：① … ② … ③ …`\n'
+            '         逐字模板见 `guides/plot-co-creation.md` 3.3，**字段名一个字都不许改**。\n'
+            '      → ⚠️ 闸门只查"**卡有没有产出 / 字段在不在 / 问过没**"：'
+            '`共创状态：作者未回应（YYYY-MM-DD）` 照常放行（"问了、作者没回、不阻塞"'
+            '是设计内的合法结果）。**不查作者改了几处**——不可校验，且会逼出表演式修改。'
+        )
+    if rewrite_plan_bad:
+        blockers.append(
+            '【改写方案表不合规】方案表**存在**但格式缺项（`guides/rewrite-units.md` '
+            '第四节；落盘 `chapters/_meta/第NN章-改写方案.md`）：\n'
+            + '\n'.join('      · ' + _q for _q in rewrite_plan_bad) +
+            '\n      → 硬层只查三件**机器可验**的事：**文件在不在 / 字段全不全 / '
+            '改前 ≠ 改后**（防空改）。\n'
+            '        「为什么更好**是否具体**」「单元**选得对不对**」机器判不了，'
+            '**不许写正则去猜** —— 猜出来会逼出"表演式改写"（理由写得像样、文本没变好）。\n'
+            '      → 补法：最小格式（字段名一字不许改，单元只认 U1–U6）：\n'
+            '           `# 第 01 章 改写方案`\n'
+            '           `| # | 缺陷项 | 单元 | 定位 | 改成什么 | 会影响 |`\n'
+            '           `### #1`\n'
+            '           `- 改前：…` / `- 改后：…` / `- 为什么更好：…`\n'
+            '      → 三行对照是"三行一组、一条不能少"：**改了标点/空格不算改动**'
+            '（归一化只保留汉字/字母/数字）。'
+        )
     if boundary_fail and not waived:
         blockers.append(
             '【章节边界有悬空钩子】check_continuity.py 退出码 1 —— 逐条复查：'
@@ -409,6 +932,12 @@ def main():
             'out_of_order': out_of_order, 'wordcount_fail': nopass,
             'missing_qc': missing_qc, 'ledger_lag': ledger_lag,
             'ledger_field_missing': ledger_field_missing, 'soft_hints': soft_hints,
+            'concrete_list_missing': concrete_list_missing,
+            'plot_card_missing': plot_card_missing,
+            # ★ v7.2.0：改写方案表 = 硬层（格式缺项）+ 软层（返工过却没出表）+ 降级留痕
+            'rewrite_plan_bad': rewrite_plan_bad,
+            'rewrite_plan_rework_without_plan': _no_plan_rework,
+            'rewrite_plan_check_skipped': _wo_skip_note,
             'boundary_fail': boundary_fail,
             'boundary_waived': waived, 'boundary_waive_reason': waiver_note,
             'redline1_hit': redline_hit, 'redline1_note': redline_note,
