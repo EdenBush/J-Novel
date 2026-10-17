@@ -21,13 +21,16 @@
     4. 台账推进 —— 03/05 台账是否推进到已完成末章
     5. 章节边界 —— 上章结尾钩子人物，本章开头是否接住
     6. 字段级（L2）—— 台账的 retryCount 有值；本批已写完的章都定了「实物清单」（≥3 项）、
-       都出了「剧情卡」（含 `本章钩子` / `要说清的事` 字段 + 头部 `共创状态：`）
+       都出了「剧情卡」（含 `本章钩子` / `要说清的事` 字段 + 头部 `共创状态：`）、
+       ★ **返工过（`06-章节工单.md` 的返工轮次 ≥1）的章都出了「改写方案表」**（v7.3.0）
 
 ⚠️ 第 6 项里的「实物清单」只查**有没有定、够不够 3 项**（事实，可判定）；
    它**不查兑现率**——"清单里的物在正文用了几项"由 `check_contract.py` 的
    `check_concrete_coverage` **只提示、不阻塞**（那一层没有人类基线）。
 ⚠️ 「剧情卡」同样只查**产出与字段**，**绝不查"作者改了几处"**（不可校验，且一旦
    做成闸门就会逼出"表演式修改"）——详见 `plot_card_missing` 处的注释。
+⚠️ 「改写方案表」分**硬层 A（格式）/ 硬层 B（返工过就必须有表）/ 降级留痕**三层，
+   判据与"为什么敢硬"见 `parse_reworked_chapters` 的 docstring 与 main 里的分层注释。
 
 用法:
     python check_batch_gate.py <项目目录>
@@ -96,6 +99,12 @@ PLAN_TITLE_RX = re.compile(r'(?m)^#{1,6}[^\n]*' + REWRITE_PLAN_TAG)
 #   所以判据是"按 `|` 切、逐格 strip 掉空白与星号之后，与这 6 个名字逐字相同"，
 #   **不是**"这几个词在文件里出现过"（前者是格式校验，后者命中一句注释就为绿）。
 PLAN_HEAD_CELLS = ('#', '缺陷项', '单元', '定位', '改成什么', '会影响')
+# ★ v7.5.0：最后一列改名为「预期改善」——旧表头「会影响」**照样认**（兼容性优先）。
+#   为什么改名（有真实依据，不是口味问题）：真实项目 10 章都在「会影响」这一格填
+#   `事件／信息／接口不变` —— **那是"边界"，不是"预期改善"**。歧义已被逐字实证。
+#   但**不许因为改名让既有项目突然全红**，故两套表头都接受。
+PLAN_HEAD_CELLS_V2 = ('#', '缺陷项', '单元', '定位', '改成什么', '预期改善')
+PLAN_HEAD_ACCEPTED = (PLAN_HEAD_CELLS, PLAN_HEAD_CELLS_V2)
 # 三行对照的字段名。⚠️ 字段名一字不许改，但**半角/全角冒号都要认**
 #   （写手可能打 `改前:`）—— 与剧情卡 `共创状态：` 的既有口径一致。
 PLAN_FIELD_BEFORE = re.compile(r'改前\s*[:：](.*)')
@@ -104,6 +113,45 @@ PLAN_FIELD_WHY = re.compile(r'为什么更好\s*[:：](.*)')
 # 六个改写单元是**接口契约**（跨 agent 共享，一个字都不许改）。
 REWRITE_UNITS = ('U1', 'U2', 'U3', 'U4', 'U5', 'U6')
 _UNIT_TOKEN_RX = re.compile(r'U[A-Za-z0-9]+')
+
+# ── 方案表的「内容精度」判据（v7.5.0 新增）──────────────────────────────
+# ★ 为什么需要它（真实事故，证据见 `rewrite-units.md` 4.0.3）：
+#   真实项目 10 章的方案表，四列字段**逐字相同**：
+#     | 1 | 落笔/句式缺陷 | U2 | 章末或指定句 | 见三行对照 | 事件／信息／接口不变 |
+#   表填满了、格式全对、**旧闸门全过** —— 而"先把耦合算清楚"这个机制的作用 = **0**。
+#   根因：旧校验只查"字段在不在、格式对不对"，**没规定内容精度**
+#   → "填满字段"成了唯一要求 → 表格退化成模板 → 改的时候没有具体目标 → 还是打地鼠。
+#
+# ★ 判据分级（照 `rewrite-units.md` 4.0.6：**形状给脚本，精度给质检子代理/人**）：
+#   · **硬层**：判据是"**这一格是不是某句固定的空话**"（整格归一化后等于黑名单项）
+#     与"定位有没有数到段/句" —— 都是**文件级事实**，**不会误伤合法值**（故敢硬拦）。
+#     ⚠️ 刻意**不用子串匹配**：`章末落笔公式化` 含"落笔"但**是合法值**，子串匹配会误伤。
+#     （v7.3.0 立的判据：**只有"有假阳性"才不许硬化**；"假阴性"只降低覆盖率。）
+#   · **软层**：理由的引号短语是否锚定在文件里、顺序说明是否像抄的 ——
+#     引号也可用于强调、顺序说明也可能合法地宽泛 ⇒ **只提示，不阻塞**。
+PLAN_BLACKLIST = {
+    '缺陷项': ('落笔/句式缺陷', '落笔／句式缺陷', '句式缺陷', '落笔缺陷', '综合问题',
+               'AI味', 'AI味重', '文字问题', '综合缺陷', '文笔问题'),
+    '定位': ('章末或指定句', '多处', '全章', '相关段落', '若干处', '指定句'),
+    '改成什么': ('见三行对照', '见下文', '见下', '同上', '待定', '酌情处理', '视情况而定'),
+}
+# `定位` 的合格形态：能数到段或句（**范围写法也要认**，如"第 3–5 段"）
+PLAN_LOC_RX = re.compile(
+    r'第\s*\d+\s*(?:[–—\-~～至到]\s*\d+\s*)?[段句]'
+    r'|末段|末句|最后一段|最后一句|倒数第\s*\d+\s*[段句]'
+    r'|章末段|结尾段')
+# `预期改善` 的"答错问题"形态：只说了"不变/不受影响"（那是"边界"，不是"改好"）
+PLAN_NOCHANGE_RX = re.compile(r'不变|不受影响|不改变|没有影响')
+# …但**含改善信号**时不算（如"句长↑，其余不变"）
+PLAN_IMPROVE_RX = re.compile(r'↑|↓|升高|降低|提高|提升|增加|增多|减少|变好|改善')
+
+
+def _norm_cell(s: str) -> str:
+    """单元格归一化：去 markdown 强调符与所有空白。用于与黑名单**整格精确**比较。
+
+    ⚠️ 刻意**保留**标点与斜杠 —— 黑名单项本身含 `/`（如"落笔/句式缺陷"）。
+    """
+    return re.sub(r'[\s\u3000*]', '', s or '')
 # 「改前 ≠ 改后」的归一化口径：**只保留汉字/字母/数字**，其余（空白、标点、
 # markdown 装饰符）**全部丢掉再比**。
 # 为什么定这么严（这一层是本闸门最容易做成形式主义的地方）：
@@ -113,13 +161,20 @@ _UNIT_TOKEN_RX = re.compile(r'U[A-Za-z0-9]+')
 # ⚠️ 这一层**永远判不了"改得好不好"** —— 它只回答"**到底改了没有**"。
 _NORM_KEEP_RX = re.compile(r'[^\u4e00-\u9fff\u3400-\u4dbfA-Za-z0-9]+')
 
-# ── 章节工单（返工轮次的**可靠触发源**，v7.2.0 新增）────────────────
+# ── 章节工单（返工轮次的**可靠触发源**，v7.2.0 新增；v7.3.0 起可做硬闸门）────
 # `06-章节工单.md` 由 `make_workorder.py --archive` **机器写入**（每章一行，
 #   列：章节 | 字数 | 机械结论 | 缺陷类型 | 返工轮次 | 备注）。
 # `05-创作台账.md` 的 `retryCount` **只有当前章**，答不出"历史上哪几章返工过"
 #   —— 所以它做不了这个触发源。
+# ★ 2026-10-10 v7.3.0：`retryCount >= 1` 从"软提示"升为**硬闸门**（见
+#   `parse_reworked_chapters` 的 docstring：**只有"有假阳性"才不许硬**）。
+# `--retry` **未指定**时写的是未知标记 `?`（不是 0）—— 那是"判不了"，既不当 0、
+#   也不当"返工过"（判据必须保守），只**留痕**（v7.1.1：跳过必须留痕）。
 WORKORDER_FILE = '06-章节工单.md'
 WORKORDER_RETRY_HEAD = '返工轮次'
+# 返工轮次的**未知标记**。⚠️ 必须与 `make_workorder.UNKNOWN_RETRY` 逐字一致
+#   （同一含义的写法只能有一份口径；它不是一个"合法的轮次数"）。
+UNKNOWN_RETRY = '?'
 
 # 共享层（唯一真相源）：read_text / parse_waivers / find_chapter_files
 #   + 实物清单（2026-10-09 v7.1.1 收归）：find_meta_file / parse_concrete_list / CONCRETE_HEAD
@@ -193,8 +248,65 @@ def parse_plot_card(text: str):
 # ══════════════════════════════════════════════════════════════════
 
 def _split_md_row(line: str) -> list:
-    """把一行 markdown 表格切成单元格：去首尾 `|`、逐格 strip 空白与 `*`。"""
-    return [c.strip().strip('*').strip() for c in line.strip().strip('|').split('|')]
+    """把一行 markdown 表格切成单元格：去首尾 `|`、逐格 strip 空白与 `*`。
+
+    支持 Markdown 的 `\\|` 转义：**只按未被转义的 `|` 切分**，并把 `\\|` 还原成 `|`
+    —— 不还原的话，单元格内容里会留着多余的反斜杠（「伏笔 \\| 回收」会读成
+    带反斜杠的「伏笔 \\ 回收」），下游拿去做字符串比较就会**对不上**。
+
+    ⚠️ **裸 `|` 仍会切错**（如单元格里直接写「伏笔 | 回收」）—— 那是**稿件数据问题**，
+    不是解析问题：Markdown 规范里这种写法本就要转义，任何解析器都读不对
+    （表格里要写竖线就得写 `\\|`，或用全角「｜」）。
+    下游**不会静默吞掉**这类行：列数对不上表头时会被计入「跳过」并**点名章号与行号**
+    （见 5.6 节红线 1 的 `redline_skips`）——**"看不见"才是事故，"看得见"是可接受的**。
+
+    ⚠️ 本函数被**多处**调用（改写方案表解析、工单解析、大纲红线），
+    **签名与返回类型不许变**（仍 `list[str]`），`strip('*')` 的行为也保留。
+    """
+    body = line.strip().strip('|')
+    # `(?<!\\)` = 该竖线**前面不是反斜杠**（即未被转义）才算分隔符。
+    return [c.strip().strip('*').strip().replace('\\|', '|')
+            for c in re.split(r'(?<!\\)\|', body)]
+
+
+def _is_md_sep_row(cells: list) -> bool:
+    """`|---|---|` 这行分隔行（含 `:---:` 对齐写法）→ 不属于任何列位。
+
+    ⚠️ 空列表必须返回 False（`all([])` 是 True，会把空行误判成分隔行）。
+    """
+    return bool(cells) and all(set(c) <= set('-: ') for c in cells)
+
+
+def _find_col(head: list, name: str) -> int:
+    """在表头里找列位（按**列名**找，列序可以任意）→ 找不到返回 -1。
+
+    ⚠️ 调用方必须自己判 -1 —— **绝不能**拿它直接下标（`c[-1]` 会取到**最后一列**，
+    把别的东西当成目标列，即"静默读错列"）。
+    """
+    for j, x in enumerate(head):
+        if name in x:
+            return j
+    return -1
+
+
+def _md_hdr_kind(cells: list) -> str:
+    """判断一行是不是「章末型 / 开场类型」表的表头 → `'full'` / `'partial'` / `''`。
+
+    · `'full'`    —— 两列都在 → **可用表头**，其下数据行按**它自己的**列位映射。
+    · `'partial'` —— 只含其中一列、且首格不是「第 N 章」→ **缺列名**：
+                     该表整体读不到列，必须**留痕**（"其下所有行未检查"）。
+    · `''`        —— 普通数据行（含章数据行）。
+
+    首格不是「第 N 章」这一条是**防误判**用的：章数据行的章末型取值不会长成
+    "章末型"这三个字，而真表头的首格总是"章号 / 章节 / 序号"这类列名。
+    """
+    has_end = any('章末型' in x for x in cells)
+    has_open = any('开场类型' in x for x in cells)
+    if has_end and has_open:
+        return 'full'
+    if (has_end or has_open) and cells and not re.match(r'^第\s*\d+\s*章', cells[0]):
+        return 'partial'
+    return ''
 
 
 def find_rewrite_plans(root: Path) -> list:
@@ -240,7 +352,8 @@ def find_plan_header(text: str):
         if not line.strip().startswith('|'):
             continue
         cells = _split_md_row(line)
-        if cells == list(PLAN_HEAD_CELLS):
+        # ★ v7.5.0：两套表头都认（旧 `会影响` / 新 `预期改善`）——见 PLAN_HEAD_ACCEPTED 的注释
+        if any(cells == list(_acc) for _acc in PLAN_HEAD_ACCEPTED):
             return i, cells
     return -1, []
 
@@ -293,15 +406,104 @@ def parse_rewrite_pairs(text: str) -> list:
     return out
 
 
-def check_rewrite_plan(text: str) -> list:
-    """校验一份改写方案表 → 返回问题列表（空 = 合规）。
+def check_plan_precision(text: str, header_cells: list) -> tuple:
+    """校验方案表**每一格的内容精度** → `(硬问题列表, 软提示列表)`。
 
-    **五条判据全是"文件级事实"**，没有一条依赖判断 —— 所以敢做成硬失败：
+    ★ **硬层**只查两件**文件级事实**（不误伤合法值，故敢硬拦）：
+      · 这一格是不是**某句固定的空话**（整格归一化后等于黑名单项）；
+      · 「定位」有没有**数到段或句**。
+      ⚠️ 刻意**不用子串匹配**：`章末落笔公式化` 含"落笔"但是**合法值**。
+    ★ **软层**查两件有假阳性可能的事（引号也可用于强调）→ 只提示，不进退出码。
+    """
+    hard, soft = [], []
+    if not header_cells:
+        return hard, soft
+
+    def _col(cells, name):
+        try:
+            i = header_cells.index(name)
+        except ValueError:
+            return ''
+        return cells[i] if i < len(cells) else ''
+
+    _last = '预期改善' if '预期改善' in header_cells else '会影响'
+    _bl = {_norm_cell(b) for _col_ in PLAN_BLACKLIST for b in PLAN_BLACKLIST[_col_]}
+
+    _rows = []
+    for _lineno, _line in enumerate(text.split('\n'), 1):
+        _s = _line.strip()
+        if not _s.startswith('|'):
+            continue
+        _cells = _split_md_row(_line)
+        if any(_cells == list(_acc) for _acc in PLAN_HEAD_ACCEPTED):
+            continue                                    # 表头行
+        if all(set(c) <= set('-: ') for c in _cells):
+            continue                                    # `|---|---|` 分隔行
+        if len(_cells) != len(header_cells):
+            continue                                    # 不是本表的行（列数不同）
+        _rows.append((_lineno, _cells))
+
+    # 按「行」聚合：同一行有多个格子不合格时**合成一条** ——
+    #   否则一份 3 行的表会刷出 15 条（真实项目 10 章 = 150 条），报告会长到没人看。
+    _bad_rows = {}
+    for _lineno, _cells in _rows:
+        _items = []
+        _hollow = [c for c in ('缺陷项', '定位', '改成什么')
+                   if _col(_cells, c) and _norm_cell(_col(_cells, c)) in _bl]
+        if _hollow:
+            _items.append('、'.join(_hollow) + ' 是空话（没有信息量）')
+        _loc = _col(_cells, '定位')
+        # ⚠️ 去重：定位已在上一行报了"空话"就不再报形态问题（同一格不报两次）
+        if _norm_cell(_loc) and not PLAN_LOC_RX.search(_loc) and '定位' not in _hollow:
+            _items.append('定位 没数到段或句')
+        _imp = _col(_cells, _last)
+        if (_norm_cell(_imp) and PLAN_NOCHANGE_RX.search(_imp)
+                and not PLAN_IMPROVE_RX.search(_imp)):
+            _items.append(f'{_last} 只写了"不变"（那一列问的是预期改善哪几项）')
+        if _items:
+            _bad_rows[_lineno] = '；'.join(_items)
+    for _lineno in sorted(_bad_rows):
+        hard.append('第 %d 行：%s。（合格写法见 `rewrite-units.md` 4.0.2）'
+                    % (_lineno, _bad_rows[_lineno]))
+
+    # ── 软层①：理由里的引号短语能不能在文件里找到（防"理由从别处抄的"）──
+    #   真实案例：某章理由提到"三叶草带湿土、抖了抖塞进袖子"，而改前/改后句里根本没有。
+    for _ma in PLAN_FIELD_WHY.finditer(text):
+        _whole = _ma.group(0)
+        for _q in re.findall(r'[“"「]([^”"」]{4,})[”"」]', _ma.group(1)):
+            if _q not in text.replace(_whole, ''):
+                soft.append(
+                    f'「为什么更好」里引用的“{_q}”**在文件里（改前/改后句）找不到** —— '
+                    f'这条理由可能是从别处抄的或记混了，请人工确认。')
+
+    # ── 软层②：顺序说明点到的单元，若表里一个都没有 → 像模板抄的 ──
+    #   真实案例：表内单元全是 U2，说明却写"先做段落级重写（U5/U6）"。
+    _head_units = set()
+    for _lineno, _cells in _rows:
+        for _tok in _UNIT_TOKEN_RX.findall(_col(_cells, '单元')):
+            _head_units.add(_tok.upper())
+    _mseq = re.search(r'顺序说明[^\n]*\n?([\s\S]{0,300})', text)
+    if _mseq and _head_units:
+        _said = {t.upper() for t in _UNIT_TOKEN_RX.findall(_mseq.group(1))}
+        if _said and not (_said & _head_units):
+            soft.append(
+                f'「顺序说明」点到的单元（{"、".join(sorted(_said))}）在表里一个都没有 —— '
+                f'像是**模板抄来的**，请按本次实际单元改写。')
+
+    return hard, soft
+
+
+def check_rewrite_plan(text: str) -> tuple:
+    """校验一份改写方案表 → `(硬问题列表, 软提示列表)`（硬列表空 = 合规）。
+
+    **判据全是"文件级事实"**，没有一条依赖判断 —— 所以敢做成硬失败：
       ① 标题行含「改写方案」
-      ② 表头行 6 列逐字对上（允许列间距不同）
+      ② 表头行 6 列逐字对上（允许列间距不同；旧 `会影响` / 新 `预期改善` 两套都认）
       ③ 至少一处三行对照齐全（`改前：` + `改后：` + `为什么更好：`）
       ④ 至少一处「改前 ≠ 改后」（归一化后比 = **防空改**）
       ⑤「单元」列里出现的编号落在 U1–U6 之内
+      ⑥ ★ v7.5.0：**内容精度**（见 `check_plan_precision`）——黑名单空话 / 定位没数到段句 /
+         「预期改善」只说了"不变"
     """
     issues = []
     if not PLAN_TITLE_RX.search(text):
@@ -309,7 +511,8 @@ def check_rewrite_plan(text: str) -> list:
 
     _hi, _hc = find_plan_header(text)
     if _hi < 0:
-        issues.append('缺表头行 `| # | 缺陷项 | 单元 | 定位 | 改成什么 | 会影响 |`')
+        issues.append('缺表头行 `| # | 缺陷项 | 单元 | 定位 | 改成什么 | 预期改善 |`'
+                      '（旧表的 `会影响` 也认）')
 
     # 哪个字段整份文件里都没有 —— 报的是"**缺字段**"，与"没有文件"是两件事
     # （用例 86 的注入 B 专门断言这一点：它反证解析器**认得出**这个文件）。
@@ -333,29 +536,64 @@ def check_rewrite_plan(text: str) -> list:
     if _bad_units:
         issues.append('「单元」列出现未知单元 %s（只认 U1–U6）'
                       % '、'.join(sorted(set(_bad_units))))
-    return issues
+
+    # ★ v7.5.0：内容精度（硬问题并入 issues；软提示另返回）
+    _hard, _soft = check_plan_precision(text, _hc)
+    issues.extend(_hard)
+    return issues, _soft
 
 
 def parse_reworked_chapters(root: Path):
-    """从 `06-章节工单.md` 读「**哪几章返工过**」→ `(set, 跳过原因)`。
+    """从 `06-章节工单.md` 读「**哪几章返工过**」
+    → `(reworked_set, 跳过原因, info_dict)`。
 
     为什么用**工单**而不是 `05-创作台账.md`：
       · 工单是 `make_workorder.py --archive` **机器写入**的，**每章一行**、字段固定；
       · 台账的 `retryCount` **只有当前章**，答不出"历史上哪几章返工过"。
-    ⚠️ **但它只够做软提示，不够做硬闸门**：`--retry` 的默认值是 0，
-      **"没填"与"真的是 0"在工单里长得一样** → 这个源**有漏报**（重新归档时忘了
-      填 `--retry`），只是几乎没有误报。**有漏报的判据不许当硬闸门**（那就是造假闸门）。
-    ⚠️ **取不到就降级 + 留痕**（v7.1.1 立的规矩：跳过必须留痕）：返回的第二个值是
+
+    ⚠️⚠️ **这个源能不能做硬闸门，取决于它有没有"假阳性"，而不是有没有"漏报"**
+    （v7.3.0 修正了 v7.2.0 那句**过宽的表述**。上一轮写的是"有漏报的判据不许当
+    硬闸门"——**这句话太宽了**，它把两种性质完全不同的偏差混成了一种）：
+
+      · **假阳性（误拦）**：把"**没改写过**的章"判成"改写过的" → 会**卡住合法流程**
+        （逼着主编给没返工的章补一张方案表）→ **绝对不能有**。
+        判据一旦有假阳性，它就是**造假闸门**（本项目最忌讳的一类失败）。
+      · **假阴性（漏拦）**：把"**改写过了**的章"漏掉 → 只是**拦得不全**
+        → **可以接受**（比完全不拦好）。
+
+    **判据（这条是本层设计的全部依据，不许简化成"有漏报就不许硬"）**：
+      **只有"有假阳性"才不许硬化；"有假阴性"只降低覆盖率，不构成禁止硬化的理由。**
+
+    按这条重新看这个源，两种信号的性质完全不同：
+      · **`retryCount >= 1` —— 无假阳性，可以硬化**（v7.3.0 已硬化为闸门 B）：
+        它是**显式填写**的（`make_workorder.py --archive N --retry K` 写进去的），
+        **填了 1 就是真的返工过 1 次** —— 没有任何"把没返工的章写成 ≥1"的路径。
+        它会有**假阴性**（忘填 → 漏拦），但"忘填"只会让闸门**少拦一章**，
+        **不会多拦一章** → 按上面的判据，**这不构成禁止硬化的理由**。
+      · **`retryCount` 读不到（`?`／空／非数字）—— 判不了，绝不当 0**：
+        v7.2.0 之前 `--retry` 的默认值是 0，于是"**没填**"与"**真的是 0**"在工单里
+        **长得一样** → 这类行既不能算"返工过"（会假阳性），也不能算"没返工"。
+        v7.3.0 起 `make_workorder.py` 在未指定 `--retry` 时写**未知标记** `?`，
+        本函数把它们收进第三个返回值 `info['unknown']`，由调用方**打进报告留痕**
+        （v7.1.1 立的规矩：**跳过/判不了必须留痕**，不许静默）。
+
+    ⚠️ **取不到工单就降级 + 留痕**（v7.1.1 立的规矩：跳过必须留痕）：返回的第二个值是
       降级理由，调用方必须把它打进报告 —— 静默跳过正是本 SKILL 最忌讳的那种失败。
-      代价如实写清：**本批次失去"边改边测"的提示**，只保留方案表的格式校验。
+      代价如实写清：**本批次失去"返工过 → 必须交出方案表"这条硬校验（闸门 B 不执行）**，
+      只剩"方案表存在时做格式校验"（闸门 A）。
+      ⚠️ **降级不等于放行**：它是"**判不了**"，所以**必须出现在报告里**——
+      报告里看不到它，就等于这一批偷偷少了一道闸门。
+
+    返回：`(reworked_set, 跳过原因, {'counts': {章号: 轮次}, 'unknown': [章号]})`
     """
     p = root / WORKORDER_FILE
     if not p.exists():
         return set(), (
             f'找不到 `{WORKORDER_FILE}`（`make_workorder.py --archive` 每章质检时写入）'
-            f'→ **无法判定哪几章返工过**，改写方案表的软提示**降级为"只在方案表存在时'
-            f'做格式校验"**。代价：边改边测（打地鼠）的章不会被提示。'
-            f'（硬层不受影响 —— 它只依赖方案表本身在不在、字段全不全。）')
+            f'→ **无法判定哪几章返工过**，因此「返工过 → 必须交出改写方案表」这条硬校验'
+            f'**降级为不执行**（注意：是**判不了**，不是"通过"）；本批只保留'
+            f'「方案表存在时做格式校验」。代价：**本批次拦不住"边改边测（打地鼠）"的章**。'
+            f'（闸门 A 不受影响 —— 它只依赖方案表本身在不在、字段全不全。）'), {}
 
     rows, idx_retry = [], None
     for line in read_text(p).split('\n'):
@@ -371,26 +609,37 @@ def parse_reworked_chapters(root: Path):
     if idx_retry is None:
         return set(), (
             f'`{WORKORDER_FILE}` 里找不到「{WORKORDER_RETRY_HEAD}」列 → 同上，'
-            f'软提示降级为"只在方案表存在时做格式校验"（代价相同）。')
+            f'「返工过 → 必须交出方案表」这条硬校验**降级为不执行**（代价相同）。'), {}
 
     if not rows:
         return set(), (f'`{WORKORDER_FILE}` 里没有可解析的工单行 → 同上，'
-                       f'软提示降级为"只在方案表存在时做格式校验"（代价相同）。')
+                       f'「返工过 → 必须交出方案表」这条硬校验**降级为不执行**'
+                       f'（代价相同）。'), {}
 
-    out = set()
+    out, counts, unknown = set(), {}, []
     for cells in rows:
         if idx_retry >= len(cells):
             continue
         m = META_NO_RX.search(cells[0])
         if not m:
             continue
+        _n = int(m.group(1))
+        _raw = cells[idx_retry].strip()
+        if _raw == UNKNOWN_RETRY:
+            # `--retry` 未指定 → `make_workorder.py` 明确写的"未知"，**不是 0**。
+            unknown.append(_n)
+            continue
         try:
-            _r = int(cells[idx_retry])
+            _r = int(_raw)
         except (TypeError, ValueError):
-            continue                                    # 空值/非数字 → 看不出返工过，跳过
+            # 空值/非数字 → 同样"判不了"。⚠️ 既不能当 0（漏拦），
+            # 也不能当"返工过"（**假阳性：会卡住合法流程**）→ 只记入未知。
+            unknown.append(_n)
+            continue
+        counts[_n] = _r
         if _r >= 1:
-            out.add(int(m.group(1)))
-    return out, ''
+            out.add(_n)
+    return out, '', {'counts': counts, 'unknown': sorted(set(unknown))}
 
 
 def main():
@@ -527,9 +776,11 @@ def main():
     ledger_field_missing = []   # ★ L2 字段级校验（2026-10-02 新增）
     concrete_list_missing = []  # ★ L2 字段级校验：实物清单（2026-10-07 v7.0.0 新增）
     plot_card_missing = []      # ★ L2 字段级校验：剧情卡（2026-10-09 v7.1.0 新增）
-    rewrite_plan_bad = []       # ★ L2 字段级校验：改写方案表格式（2026-10-09 v7.2.0 新增）
-    _no_plan_rework = []        # ★ 软提示：返工过却没出方案表（同上，不阻塞）
-    _wo_skip_note = ''          # ★ 软层降级留痕（找不到工单时非空；见 parse_reworked_chapters）
+    rewrite_plan_bad = []       # ★ L2 硬层 A：方案表**存在**但格式缺项（v7.2.0）
+    _no_plan_rework = []        # ★ L2 硬层 B：**返工过却没有方案表**的章号（v7.3.0 起硬拦）
+    _rework_rows = []           # ★ 硬层 B 的明细行（`第 N 章：返工轮次 = K`，给主编看的）
+    _wo_skip_note = ''          # ★ 降级留痕（找不到工单时非空；见 parse_reworked_chapters）
+    _retry_unknown_note = ''    # ★ 返工轮次读不到（`?`／空／非数字）的留痕（v7.3.0）
     soft_hints = []             # 软提示（不阻塞）
     if completed:
         last = max(completed)
@@ -657,19 +908,36 @@ def main():
             if _fails:
                 plot_card_missing.append(f'第 {_n} 章：' + '；'.join(_fails))
 
-        # ══ 改写方案表（改写工程，v7.2.0 新增）════════════════════════════
-        # **判据分两层，两层的性质完全不同** —— 分层的理由就是本 SKILL 的铁律
-        # "**能机器验的只有两件：① 文件/字段在不在 ② 改前 ≠ 改后**"：
+        # ══ 改写方案表（改写工程，v7.2.0 新增；v7.3.0 把软层升级为硬层）══════
+        # **最终形态是三层（硬 A / 硬 B / 降级留痕），性质各不相同** —— 分层的依据是
+        # 本 SKILL 的铁律"**能机器验的只有两件：① 文件/字段在不在 ② 改前 ≠ 改后**"，
+        # 加上 v7.3.0 立的一条判据：**只有"有假阳性"才不许硬化**。
         #
-        # ▸ **硬层（可判定 → 敢做成硬失败）**：方案表**存在**时，必须
+        # ▸ **硬层 A（可判定 → 敢做成硬失败）**：方案表**存在**时，必须
         #     ① 标题行含「改写方案」② 表头 6 列逐字对上（允许列间距不同）
         #     ③ 至少一处三行对照齐全 ④ 至少一处「改前 ≠ 改后」（防空改）
         #     ⑤「单元」列里出现的编号落在 U1–U6
         #   五条全是**文件级事实**（东西在不在 / 格子填没填 / 字符串一样不一样 /
         #   编号在不在契约里），没有一条依赖"判断"，所以硬失败是站得住的。
         #
-        # ▸ **软层（宁可不做，也不造一个"看起来在工作的闸门"）**：以下三件事
-        #   **机器判不了，所以一条判据都不写**，交独立质检子代理 / 人：
+        # ▸ **硬层 B（v7.3.0 新增：从"软提示"升级而来）**：窗口内**返工过**
+        #   （`06-章节工单.md` 的「返工轮次」≥1）的章，**必须存在**改写方案表。
+        #   为什么现在敢硬 —— **v7.2.0 那句"有漏报的判据不许当硬闸门"过宽了**，
+        #   必须把两种偏差分开（详见 `parse_reworked_chapters` 的 docstring）：
+        #     · **假阳性（误拦）**：把"没改写的章"判成"改写过的" → **卡住合法流程**
+        #       → **绝对不能有**（那就是造假闸门）；
+        #     · **假阴性（漏拦）**：把"改写过的章"漏掉 → 只是**拦得不全**
+        #       → **可以接受**（比完全不拦好）。
+        #   **判据：只有"有假阳性"才不许硬化。** `retryCount >= 1` 是**显式填写**的
+        #   （填了 1 就是真返工过 1 次），**没有"把没返工的章写成 ≥1"的路径**
+        #   → 无假阳性 → 可以硬。它会漏拦（忘填 `--retry`），但漏拦只是少拦一章。
+        #   ⚠️ 用户实测到的"跳过"正是这一层软着导致的：**Agent 打完字改完、
+        #   只要不写方案表，闸门完全静默**。
+        #   ⚠️ **只查存在性，不查方案表内容质量** —— "为什么更好是否具体""单元
+        #   选得对不对"是理解级判断，机器判不了，交**独立质检子代理四问**。
+        #
+        # ▸ **软层（不许写判据的那三件事）**：以下三件事**机器判不了，所以一条
+        #   判据都不写**，交独立质检子代理 / 人：
         #     ·「为什么更好」是否**具体** —— `rewrite-units.md` 4.3 已论证它是
         #       理解级判断（与 v6.9.0「闲笔密度」是同一次失败教训）→ **宁可承认测不了**
         #     · 单元**选得对不对**（把 U5 当 U1 用？）
@@ -677,38 +945,50 @@ def main():
         #   ⚠️ **不许写正则去猜这三件事**：猜出来的判据会逼出"**表演式改写**"
         #      （把理由写得像样、单元编号填对，而文本一点没变好）——那**比没有闸门更糟**。
         #
-        # ▸ **软提示（不阻塞）**：**返工过却没有方案表** → 说明这一章是**边改边测**
-        #   （打地鼠）而不是"先出方案、再一次改完"。触发源 = `06-章节工单.md` 的
-        #   「返工轮次」（机器写的、每章一行）。**它有漏报**（`--retry` 默认 0，
-        #   "没填"与"真的是 0"长得一样）→ **只能做软提示，不许当硬闸门**。
-        #   取不到工单 → **降级 + 留痕**（降级理由与代价由 `parse_reworked_chapters` 给出，
-        #   见该函数的 docstring；v7.1.1 立的规矩：**跳过必须留痕**）。
+        # ▸ **降级 + 留痕（取不到工单时）**：**降级不等于放行**——它是"**判不了**"。
+        #   降级理由与代价由 `parse_reworked_chapters` 给出（v7.1.1 立的规矩：
+        #   **跳过必须留痕**），调用方必须打进报告；静默少一道闸门是本 SKILL
+        #   最忌讳的失败。⚠️ 降级时**绝不能**改判为"通过"（那是造假闸门）。
         # ⚠️ 只扫**本批次窗口内已经写完的章**（`completed`），与上面两条 L2 校验同口径：
         #   窗口外 / 旧项目一律不牵连（新必填字段**不追溯旧稿**）。
         for _n in completed:
             _pp = find_rewrite_plan(root, _n)
             if _pp is None:
-                continue                    # 不存在 → 硬层不判（交给下面那条软提示）
-            _plan_issues = check_rewrite_plan(read_text(_pp))
+                continue                    # 不存在 → 硬层 A 不判（由硬层 B 判）
+            _plan_issues, _plan_soft = check_rewrite_plan(read_text(_pp))
             if _plan_issues:
                 rewrite_plan_bad.append(
                     f'第 {_n} 章：{_pp.name} —— ' + '；'.join(_plan_issues))
+            # ★ v7.5.0：**软层提示**（理由是否锚定 / 顺序说明是否像抄的）—— 只提示，不阻塞
+            for _hint in _plan_soft:
+                soft_hints.append(f'第 {_n} 章：{_pp.name} —— {_hint}')
 
-        _reworked, _wo_skip = parse_reworked_chapters(root)
+        _reworked, _wo_skip, _wo_info = parse_reworked_chapters(root)
         _wo_skip_note = _wo_skip
         if _wo_skip:
             soft_hints.append(_wo_skip)     # ★ 跳过必须留痕（v7.1.1）
         else:
+            _counts = _wo_info.get('counts', {})
+            # ★ 硬层 B：返工轮次 ≥1 的章，必须有对应的改写方案表（v7.3.0）
             _no_plan_rework[:] = [x for x in sorted(_reworked & set(completed))
                                   if find_rewrite_plan(root, x) is None]
-            if _no_plan_rework:
-                soft_hints.append(
-                    '第 %s 章：`%s` 里记着**返工过**（返工轮次 ≥1），本章却**没有'
-                    '改写方案表**（`chapters/_meta/第NN章-%s.md`）—— 返工过 = 这一章'
-                    '被改过；没有方案表 = 是**边改边测**（打地鼠），不是**先出方案、'
-                    '再一次改完**。下轮起先落方案表再动手。'
-                    % ('、'.join(str(x) for x in _no_plan_rework), WORKORDER_FILE,
-                       REWRITE_PLAN_TAG))
+            _rework_rows[:] = ['第 %d 章：返工轮次 = %d'
+                               % (x, _counts.get(x, 1)) for x in _no_plan_rework]
+            # ★ 留痕：返工轮次读不到（`?`／空／非数字）的章 —— 既不当 0、也不当返工过。
+            _unk = [x for x in _wo_info.get('unknown', []) if x in set(completed)]
+            if _unk:
+                _retry_unknown_note = (
+                    '第 %s 章：`%s` 的「返工轮次」记的是**未知**（`?`／空／非数字 —— '
+                    '`make_workorder.py` 在**未指定 `--retry`** 时写入 `%s`）—— '
+                    '这几章**既不算"返工过"、也绝不算 0**：`--retry` 的默认值曾是 0，'
+                    '"没填"与"真的是 0"在工单里长得一样，所以判据必须保守'
+                    '（**有假阳性才不许硬，假阴性可以接受**）→ 本闸门对这 %d 章'
+                    '既不拦也不是"放行"，只是**判不了**；一次合格率里它们也不能算'
+                    '"首次合格"。要消掉这条提示：重跑 '
+                    '`--archive <章号> --retry N` 把轮次补上。'
+                    % ('、'.join(str(x) for x in _unk), WORKORDER_FILE,
+                       UNKNOWN_RETRY, len(_unk)))
+                soft_hints.append(_retry_unknown_note)
 
         # 软提示：对话专项列（2026-10-02 随对话体系新增；给存量项目留过渡，不阻塞）
         _arc = root / '04-质检档案.md'
@@ -777,67 +1057,103 @@ def main():
     # ---------------- 5.6 崩坏红线 1：连续 3 章同章末型 / 同开场类型 ----------------
     # 原设计里这条红线只写在文档里，靠 Agent 自己数——会话一切断就数不了（03/05 台账都不记这个）。
     # 但数据其实在 01-大纲.md 的章节表里（章末型 / 开场类型两列），所以可以机械检查。
+    #
+    # ★★ 2026-10-10 v7.4.0 修：**一个 01-大纲.md 里常有多张表**（分卷大纲就是"每卷一张表"），
+    #   而旧实现只认**扫描到的第一个表头**，把后面几张表的行统统按"列数与表头不一致"丢掉。
+    #   实测某真实项目因此丢掉 **42 行** —— 而"连续两章同型"是本书的红线之一：
+    #   **漏检 42 行 = 这条红线在这 42 行上形同不存在**，输出里却只有一行不起眼的 [警告]。
+    #   改法（★注意修的是**哪一半**）：**列的个数校验一个字没动**（它本意是对的 ——
+    #   列错位会把「章末型」读成「开场类型」→ **误报**红线）。修的是**解析器读不准**：
+    #   ① 一行一个表头 → **扫描全部表头**；② 表头归属按**行号区间**（行归"最近的上方表头"）；
+    #   ③ 逐表用**该表自己的表头**做列数校验与列位映射。让它把**本来能读对的行读对**，
+    #   读不对的**才**跳过 —— 且跳过必须**点名章号 + 行号 + 原因**（不再是一行笼统警告）。
     redline_note, redline_hit = '', False
+    redline_skips = []          # 仍被跳过的行/表：逐条点名 —— "跳过必须留痕"（skill-mechanics.md 反模式表）
     outline = root / '01-大纲.md'
     if outline.exists():
-        rows = []
-        for line in read_text(outline).split('\n'):
+        data = []
+        cur = None              # 当前所在表的表头：(行号, 单元格, 是否可用)
+        for ln, line in enumerate(read_text(outline).split('\n'), 1):
             if not line.strip().startswith('|'):
+                # 非表格行（`## 第一卷` / 空行 / 散文…）→ **当前表到此结束**。
+                # 少了这一步，第二张表**之前**的散文行会被算进第一张表的地盘。
+                cur = None
                 continue
-            cells = [c.strip().strip('*').strip() for c in line.strip().strip('|').split('|')]
-            rows.append(cells)
-        head, hdr_i = None, -1
-        for i, c in enumerate(rows):
-            if any('章末型' in x for x in c):
-                head, hdr_i = c, i
-                break
-        if head:
-            def col(name):
-                for j, x in enumerate(head):
-                    if name in x:
-                        return j
-                return -1
-            i_end, i_open = col('章末型'), col('开场类型')
-            data, skewed = [], 0
-            for c in rows[hdr_i + 1:]:
-                mnum = re.match(r'^第\s*(\d+)\s*章', c[0]) if c else None
-                if not mnum:
-                    continue
-                # ⚠ 列数必须与表头一致——否则列会错位，把「章末型」读成「开场类型」
-                if len(c) != len(head):
-                    skewed += 1
-                    continue
-                data.append((int(mnum.group(1)), c[i_end][:6], c[i_open][:8]))
-            if skewed:
-                print(f'  [警告] 01-大纲 有 {skewed} 行与表头列数不一致，已跳过（列错位会误报红线）')
-            # 「续接 / 跳接」是 SKILL 规定的**默认与过渡**开场类型（"默认续接"），
-            # 连续出现是正常写法，不算崩坏——否则每本书开局都会误报。
-            # 「章末型」不豁免：SKILL 明确规定"连续两章不得同型，尤其不得连续两章悬念型"。
-            #
-            # 语义：红线 1 问的是"**当下**是不是崩坏了"（不是"历史上有没有出现过"），
-            # 所以只看**最近的 3 行**。
-            #
-            # ⚠️ 2026-09-14 修：此前是 `[x for x in data if x[idx]][-3:]` —— 先按
-            # "该字段非空"过滤，再取最后 3 条。若中间某章该字段为空（如第 3 章没填
-            # 章末型），取到的会是**第 1/2/4 章**，把"不相邻的 3 章"当成连续同型报出来。
-            # 现改为：取最后 3 行原始记录 + **校验章号严格连续**（空值即不满足）。
-            _EXEMPT_OPEN = {'续接', '跳接'}
-            for field, idx in (('章末型', 1), ('开场类型', 2)):
-                last3 = data[-3:]
-                if len(last3) != 3:
-                    continue
-                if not all(last3[i][0] + 1 == last3[i + 1][0] for i in range(2)):
-                    continue          # 章号不连续（有缺章/跳号）→ 不判
-                if any(not x[idx] for x in last3):
-                    continue          # 有章没填这个字段 → 不判（避免拿空值当"同型"）
-                v = last3[0][idx]
-                if len({x[idx] for x in last3}) != 1:
-                    continue
-                if field == '开场类型' and any(e in v for e in _EXEMPT_OPEN):
-                    continue
-                redline_hit = True
-                redline_note = (f'连续 3 章同一{field}（{v}）：'
-                                f'第 {last3[0][0]}/{last3[1][0]}/{last3[2][0]} 章')
+            cells = _split_md_row(line)
+            if _is_md_sep_row(cells):
+                continue        # `|---|---|` 分隔行不属于任何列位
+            kind = _md_hdr_kind(cells)
+            if kind:
+                cur = (ln, cells, kind == 'full')
+                if kind == 'partial':
+                    # 缺列名的表头：**整张表读不到列** —— 留痕（说清"其下所有行未检查"）。
+                    # 旧实现在这里会静默少查一张表：`col()` 返回 -1 后 `c[-1]` 取到**最后一列**，
+                    # 把别的东西当成「开场类型」。
+                    redline_skips.append(
+                        f'第 {ln} 行的表头 / 原因：只有「章末型」与「开场类型」中的一列'
+                        f'（缺列名）→ 该表无法定位列，**其下所有章数据行未检查**')
+                continue
+            mnum = re.match(r'^第\s*(\d+)\s*章', cells[0]) if cells else None
+            if not mnum:
+                continue        # 不是章数据行（如「合计」行）→ 与红线 1 无关，不算"跳过"
+            n = int(mnum.group(1))
+            if cur is None:
+                redline_skips.append(
+                    f'第 {n} 章 / 第 {ln} 行 / 原因：其上方没有任何含「章末型 / 开场类型」的表头'
+                    f'→ 未参与红线 1 检查')
+                continue
+            hln, hcells, hdr_ok = cur
+            if not hdr_ok:
+                redline_skips.append(
+                    f'第 {n} 章 / 第 {ln} 行 / 原因：所在表的表头（第 {hln} 行）缺列名'
+                    f'→ 未参与红线 1 检查')
+                continue
+            # ⚠ 列的个数校验**保留原样**（放宽它就是"为了少警告而放行列错位"→ 会误报红线）。
+            #   变的只是"跳过要说清楚是谁、为什么"。
+            if len(cells) != len(hcells):
+                redline_skips.append(
+                    f'第 {n} 章 / 第 {ln} 行 / 原因：列数 {len(cells)} 与所在表头'
+                    f'（第 {hln} 行）的 {len(hcells)} 列不一致（列错位会误报红线，故不参与检查）')
+                continue
+            i_end, i_open = _find_col(hcells, '章末型'), _find_col(hcells, '开场类型')
+            data.append((n, cells[i_end][:6], cells[i_open][:8]))
+
+        # ★ 多表合并后**章号可能不连续**（第 1–20 章一张表、第 21–40 章另一张），
+        #   而红线 1 的语义是"看**最近 3 行**"（问的是"当下是不是崩坏了"）。
+        #   所以必须**先按章号排序**再取最后 3 行 —— **不能**按文件里出现的顺序取，
+        #   否则分卷表一换，取到的是"上一卷末尾 + 本卷开头"这种**不相邻**的 3 章
+        #   （正是 2026-09-14 那次假红线的同型错误）。排序是稳定的：同章号保持原序。
+        data.sort(key=lambda t: t[0])
+
+        # 「续接 / 跳接」是 SKILL 规定的**默认与过渡**开场类型（"默认续接"），
+        # 连续出现是正常写法，不算崩坏——否则每本书开局都会误报。
+        # 「章末型」不豁免：SKILL 明确规定"连续两章不得同型，尤其不得连续两章悬念型"。
+        #
+        # 语义：红线 1 问的是"**当下**是不是崩坏了"（不是"历史上有没有出现过"），
+        # 所以只看**最近的 3 行**（`data` 已按章号排序，见上）。
+        #
+        # ⚠️ 2026-09-14 修：此前是 `[x for x in data if x[idx]][-3:]` —— 先按
+        # "该字段非空"过滤，再取最后 3 条。若中间某章该字段为空（如第 3 章没填
+        # 章末型），取到的会是**第 1/2/4 章**，把"不相邻的 3 章"当成连续同型报出来。
+        # 现改为：取最后 3 行原始记录 + **校验章号严格连续**（空值即不满足）。
+        # ⚠️ 这一段判据 v7.4.0 **一字未动**（多表改动只影响 `data` 怎么攒出来）。
+        _EXEMPT_OPEN = {'续接', '跳接'}
+        for field, idx in (('章末型', 1), ('开场类型', 2)):
+            last3 = data[-3:]
+            if len(last3) != 3:
+                continue
+            if not all(last3[i][0] + 1 == last3[i + 1][0] for i in range(2)):
+                continue          # 章号不连续（有缺章/跳号）→ 不判
+            if any(not x[idx] for x in last3):
+                continue          # 有章没填这个字段 → 不判（避免拿空值当"同型"）
+            v = last3[0][idx]
+            if len({x[idx] for x in last3}) != 1:
+                continue
+            if field == '开场类型' and any(e in v for e in _EXEMPT_OPEN):
+                continue
+            redline_hit = True
+            redline_note = (f'连续 3 章同一{field}（{v}）：'
+                            f'第 {last3[0][0]}/{last3[1][0]}/{last3[2][0]} 章')
 
     # ---------------- 报告 ----------------
     blockers = []
@@ -904,6 +1220,31 @@ def main():
             '      → 三行对照是"三行一组、一条不能少"：**改了标点/空格不算改动**'
             '（归一化只保留汉字/字母/数字）。'
         )
+    if _no_plan_rework:
+        # ★ v7.3.0 硬层 B。为什么敢硬：`retryCount >= 1` 是**显式填写**的、
+        #   **无假阳性**（见 `parse_reworked_chapters` 的 docstring）。
+        #   ⚠️ 只查**存在性** —— 表写得好不好由**独立质检子代理四问**判，脚本判不了。
+        blockers.append(
+            '【返工过却没有改写方案表】这一批里有章**返工过**（`%s` 里机器写入的'
+            '「返工轮次」≥1），但 `chapters/_meta/` 下**没有改写方案表**：\n'
+            % WORKORDER_FILE
+            + '\n'.join('      · ' + _x for _x in _rework_rows) +
+            '\n      → 返工过 = 这一章被改过；**没有方案表 = 是"边改边测"（打地鼠），'
+            '而不是"改前先出方案、一次改完"**。\n'
+            '       14 项指标是耦合的（补长句会把明喻挤上去、补数字那一轮情绪词归零），'
+            '打地鼠会把上一轮刚改好的地方再挤坏一次 —— 所以"改前先把耦合算进表里"'
+            '是工序，不是形式。\n'
+            '      → 落盘：`chapters/_meta/第NN章-' + REWRITE_PLAN_TAG + '.md`'
+            '（格式见 `guides/rewrite-units.md` 第四节），'
+            '最小格式（字段名一字不许改，单元只认 U1–U6）：\n'
+            '           `# 第 NN 章 改写方案`\n'
+            '           `| # | 缺陷项 | 单元 | 定位 | 改成什么 | 会影响 |`\n'
+            '           `### #1`\n'
+            '           `- 改前：…` / `- 改后：…` / `- 为什么更好：…`\n'
+            '      → ⚠️ 本闸门**只查"有没有交出这张表"**；"表写得好不好"'
+            '（为什么更好是否具体、单元选得对不对）**机器判不了**，'
+            '由**独立质检子代理四问**判 —— 见 `guides/deai-entry.md` 第 4 步。'
+        )
     if boundary_fail and not waived:
         blockers.append(
             '【章节边界有悬空钩子】check_continuity.py 退出码 1 —— 逐条复查：'
@@ -934,13 +1275,18 @@ def main():
             'ledger_field_missing': ledger_field_missing, 'soft_hints': soft_hints,
             'concrete_list_missing': concrete_list_missing,
             'plot_card_missing': plot_card_missing,
-            # ★ v7.2.0：改写方案表 = 硬层（格式缺项）+ 软层（返工过却没出表）+ 降级留痕
+            # ★ v7.2.0 = 硬层 A（格式）+ 软提示；★ v7.3.0 = 再加**硬层 B**
+            #   （返工过却没出表 → 不再只是提示）+ 降级留痕 + 未知轮次留痕
             'rewrite_plan_bad': rewrite_plan_bad,
             'rewrite_plan_rework_without_plan': _no_plan_rework,
             'rewrite_plan_check_skipped': _wo_skip_note,
+            'retry_count_unknown': _retry_unknown_note,
             'boundary_fail': boundary_fail,
             'boundary_waived': waived, 'boundary_waive_reason': waiver_note,
             'redline1_hit': redline_hit, 'redline1_note': redline_note,
+            # ★ v7.4.0「跳过必须留痕」：01-大纲 红线 1 未参与检查的行/表，
+            #   逐条点名（章号 / 行号 / 原因）—— "该查的行被静默跳过、而报告全绿"不许再发生。
+            'redline1_skipped': redline_skips,
             'costMode': cost_mode,
             'pass': not blockers,
         }, ensure_ascii=False, indent=2))
@@ -966,6 +1312,16 @@ def main():
             print('     · %s' % _h)
     if redline_note:
         print(f'  [红线1] {redline_note}')
+    # ★ 跳过必须留痕：逐条点名，"看不见"才是事故（不阻塞 —— 行在表外可能是合法的）。
+    if redline_skips:
+        print(f'  [红线1·未检查] 01-大纲 有 {len(redline_skips)} 行/表**未参与**「章末型 / 开场类型」'
+              f'连续性检查（不是"检查通过"，是"没查"）：')
+        for _s in redline_skips[:12]:
+            print(f'     · {_s}')
+        if len(redline_skips) > 12:
+            print(f'     · …另有 {len(redline_skips) - 12} 条（同上，常见成因是裸 `|` 未转义）')
+        print('     → 修法：① 表格里的竖线写成 `\\|`（或改掉用「｜」全角）；'
+              '② 每张表都要有含「章末型」「开场类型」两列的表头。')
     print()
 
     if not blockers:

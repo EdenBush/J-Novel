@@ -127,6 +127,13 @@ def restore_scripts():
 #   文件名 `.test_guards_journal.json` 不是 `.md`/`.py`，因此不会被任何守卫的 glob 扫到。
 _JOURNAL = Path(__file__).resolve().parent / '.test_guards_journal.json'
 
+# 注入用例的哨兵串 —— 所有 mutate 都把某个锚点换成**含它的**串（`QQQ` / `QQQ.md` / `QQQ-toolkit` …）。
+# ★ 自愈靠它区分两种"与快照不符"（2026-10-10 v7.3.0 补，因为**两位同事都踩过**下面这个坑）：
+#   · **当前含哨兵、快照不含** → 上一跑注入没还原 → **该恢复**；
+#   · **当前不含哨兵** → 很可能你手工改过 → **绝不能动**。
+#   （旧版无条件恢复"与快照不符"的文件 → 陈旧快照会把人工改动**静默回滚**。那是"用新坑换旧坑"。）
+_SENTINEL = 'QQQ'
+
 
 def _snapshot_targets():
     """快照范围 = 用例可能注入的全部文件（**宁多勿漏**：多快照一个只是多读一次盘）。"""
@@ -150,28 +157,36 @@ def _journal_load() -> dict:
 
 
 def _journal_clear():
-    """整跑确认全绿后清空快照 —— 树干净了，快照就没意义了（也免得它常驻误导下一跑）。"""
+    """整跑确认全绿后清空快照 —— 树干净了，快照就没意义了。
+
+    ⚠️ **只写空、绝不删除**（v7.3.0 改 —— 两位同事各踩过一次）：
+      本机实测 `unlink` 会被 safe-delete 拦下；**更糟的是它不是抛可捕获的异常，而是直接终止进程**
+      （实测：调用后脚本 exit=1，**后面的代码一行都不跑**）→ 所以"删不掉再写空"这种兜底
+      **根本来不及执行**。改成**一开始就不删**：写 `{}`，`_journal_load` 读到空 = 无快照。
+      代价：磁盘上常驻一个 `{}` 小文件（`.json`，不会被任何守卫的 glob 扫到）。
+    """
     try:
-        _JOURNAL.unlink(missing_ok=True)
-    except Exception:
-        pass
+        _JOURNAL.write_text('{}', encoding='utf-8')
+    except Exception as e:
+        print(f'  ⚠ 快照清空失败（{e!r}）—— 下次启动会回放这个旧快照，请手工处理 {_JOURNAL}')
 
 
 def self_heal() -> tuple:
-    """★ 启动自愈：把库恢复到上一跑开始前的样子。返回 (恢复数, 跳过数)。
+    """★ 启动自愈：回放上一跑留下的快照，**只恢复"确实是注入残留"的文件**。返回 (恢复数, 跳过数)。
 
     ⚠️ 必须在**任何注入之前**、**基线检查之前**调用 —— 否则上一次的残留会被当成真缺陷，
     于是"基线本来就不绿"，整个测试直接拒跑（这次事故的表象正是这个）。
 
-    ⚠️ **代价要说清**：它会**覆盖**这些文件。若你在一跑被中断之后、又手工改过其中某个文件，
-    那个改动**会被回滚**。所以：① 中断后**先重跑一次本脚本**（自愈），**再**动手改东西；
-    ② 自愈会逐个打印被还原的文件名 —— **看着那份名单再决定要不要重做你的改动**。
-    （无 git 可用，所以只能靠"打印 + 顺序约定"把风险降到可见，不能假装它不存在。）
+    ★ **判据（v7.3.0 收紧 —— 因为两位同事各踩过一次旧版的坑）**：只恢复
+      **"当前内容含注入哨兵 `_SENTINEL`、而快照不含"** 的文件 —— 那才**确定**是"上一跑注入没还原"。
+      其余"与快照不符"的文件**一律跳过不恢复**（列出来给你看）。
+      理由：**陈旧快照 + 你在这之后的手工改动**是最坏组合，旧版无条件恢复会把人工改动**静默回滚**
+      ——那是"用新坑换旧坑"。**宁可漏恢复（看得见），不可乱回滚（看不见）。**
     """
     d = _journal_load()
     if not d:
         return (0, 0)
-    n, skipped = 0, 0
+    n, skipped, drifted = 0, 0, []
     for rel, orig in d.items():
         if not isinstance(orig, str):
             # 旧格式（rel -> {orig, inj}，v7.2.0 开发中途的残留）——无法可靠判定，跳过交人。
@@ -187,12 +202,23 @@ def self_heal() -> tuple:
             cur = f.read_text(encoding='utf-8')
             if cur == orig:
                 continue                    # 没被动过 → 不算恢复，也不吭声（绝大多数是这种）
-            f.write_text(orig, encoding='utf-8')
-            n += 1
-            print(f'  ↻ 自愈还原：{rel}')
+            if _SENTINEL in cur and _SENTINEL not in orig:
+                f.write_text(orig, encoding='utf-8')
+                n += 1
+                print(f'  ↻ 自愈还原：{rel}')
+            else:
+                skipped += 1
+                drifted.append(rel)
         except Exception as e:
             skipped += 1
             print(f'  ⚠ 自愈失败：{rel} —— {e!r}（请手工检查该文件）')
+    if drifted:
+        print(f'  ⚠ 下列 {len(drifted)} 个文件与快照不符、但**不含注入哨兵** → '
+              f'**跳过不恢复**（疑似你手工改过，或快照已过旧）：')
+        for r in drifted[:12]:
+            print(f'      · {r}')
+        if len(drifted) > 12:
+            print(f'      … 另有 {len(drifted) - 12} 个')
     _journal_clear()
     return (n, skipped)
 
@@ -1455,35 +1481,36 @@ def main():
                                                  encoding='utf-8')
         return base
 
-    print('86. **改写方案表缺失 / 字段缺失 → 软提示 + 硬拦**（两层，性质不同）')
+    print('86. **改写方案表格式层（硬层 A）+ 判不了时的降级留痕**')
     print('   （v7.2.0 之前"出了方案表"和"没出"过闸门的结果完全一样 ——')
     print('     而这是"生成点有了、交付点有了、校验点没有"的**第 4 次**。）')
-    print('   ⚠️ **两层刻意分开**：')
-    print('     · **硬层** = 方案表**存在**时校验格式（文件/字段在不在、改前≠改后）；')
-    print('     · **软层** = **返工过却没有方案表** → 只**提示**、**不阻塞**。')
-    print('       为什么不阻塞：触发源 `06-章节工单.md` 的「返工轮次」由 `--retry` 写入，')
-    print('       **默认值是 0 —— "没填"与"真的是 0"长得一样** → 这个源**有漏报**。')
-    print('       **有漏报的判据不许当硬闸门**（那就是造假闸门）；它只配做提示。')
+    print('   ⚠️ **硬层 A** = 方案表**存在**时校验格式（文件/字段在不在、改前≠改后）。')
+    print('     "返工过却没出表"那一层在 v7.3.0 已升级为**硬层 B**（见用例 89）。')
+    print('   ⚠️ **降级留痕** = 没有 `06-章节工单.md` 时，"哪几章返工过"**判不了** ——')
+    print('     于是闸门 B **不执行**，但**必须把这件事写进报告**（v7.1.1：跳过必须留痕）。')
+    print('     ⚠️ 降级**不等于放行**：它是"判不了"；静默少一道闸门 = 偷偷放行。')
+    print('     本用例注入 A 就是钉这一条：exit=0 但报告里必须出现降级理由 + 代价。')
     _p86a = _mk_rewrite_proj(_tmp / '_guard_plan_ok', plan='ok', workorder=0)
     _rc86a, _o86a = _run_gate(_p86a)
-    # 注入 A：工单记着返工过（轮次 1），但**没有**方案表 → 软提示（不阻塞）
-    _p86b = _mk_rewrite_proj(_tmp / '_guard_plan_none', plan=None, workorder=1)
+    # 注入 A：**没有工单**（判不了哪几章返工过）→ 降级 + 留痕（不阻塞）
+    _p86b = _mk_rewrite_proj(_tmp / '_guard_plan_none', plan='ok', workorder=None)
     _rb86, _ob86 = _run_gate(_p86b)
     # 注入 B：方案表**存在**但删掉「为什么更好：」→ 硬拦，且报的是**缺字段**
     #         （**这正好反证解析器认得出这个文件** —— 不是"没找到文件"）
     _p86c = _mk_rewrite_proj(_tmp / '_guard_plan_nowhy', plan='nowhy', why=False)
     _rc86c, _oc86c = _run_gate(_p86c)
     print(f'       control（方案表完整·工单无返工）exit={_rc86a}（应 0）｜'
-          f'注入A（无方案表·返工过）exit={_rb86}（**应 0 —— 软层不该阻塞**）｜'
+          f'注入A（无工单 → 判不了）exit={_rb86}（**应 0 —— 判不了不许当拦**）｜'
           f'注入B（有表缺字段）exit={_rc86c}（应 1）')
     # ⚠️ 断言用**专用标记**，不用"改写方案表"这种也会出现在"补法提示"里的词 ——
     #    本项目已有两次"断言命中无关文本"的假通过。
     _ok86 = (_rc86a == 0 and _rb86 == 0 and _rc86c == 1
-             and ('没有改写方案表' in _ob86)          # 软提示真的念出来了
-             and ('【改写方案表不合规】' in _oc86c)   # 硬层真的拦下了
+             and ('无法判定哪几章返工过' in _ob86)   # 降级理由真的念出来了
+             and ('降级为不执行' in _ob86)            # 且必须说"不是通过"
+             and ('【改写方案表不合规】' in _oc86c)   # 硬层 A 真的拦下了
              and ('缺「为什么更好：」' in _oc86c))     # 报"缺字段"，不是"没有文件"
-    print(f'  {"✓" if _ok86 else "✗"} 方案表两层  →  '
-          f'{"抓到（软提示 + 硬拦 + 缺字段反证）" if _ok86 else "**没抓到！**"}')
+    print(f'  {"✓" if _ok86 else "✗"} 格式层 + 降级留痕  →  '
+          f'{"抓到（硬拦 + 缺字段反证 + 降级留痕）" if _ok86 else "**没抓到！**"}')
     if not _ok86:
         print('       注入B 输出尾部：', _oc86c[-300:].replace('\n', ' / ')[:220])
         print('       注入A 输出尾部：', _ob86[-300:].replace('\n', ' / ')[:220])
@@ -1543,8 +1570,570 @@ def main():
         print('       注入A 输出尾部：', _ob88[-300:].replace('\n', ' / ')[:220])
     results.append(_ok88)
 
+    # ══════════════════════════════════════════════════════════════════
+    # 89 / 90：v7.3.0「执行力度：去 AI 味入口」的**校验点**
+    #   背景：用户跑了几个真实项目，Agent 自己承认「**没按 SKILL 流程走，是凭记忆动手的**」。
+    #   核实后的确切缺口（v7.2.0 自己承认的）："返工过却没出方案表"这一层只是**软提示**
+    #   → **Agent 打完字改完、只要不写方案表，闸门完全静默**。这正是用户看到的"跳过"。
+    #   v7.3.0 把这一层升级为**硬层 B**，并钉下一条判据（v7.2.0 那句话过宽了）：
+    #     **只有"有假阳性"才不许硬化；"有假阴性"只降低覆盖率，不构成禁止硬化的理由。**
+    #     89 = 硬层 B 有牙齿（返工过 + 没表 → 拦；有表 → 放行）
+    #     90 = ★ **防假阳性护栏**（没返工过 + 没表 → 必须放行）
+    # ══════════════════════════════════════════════════════════════════
+    print('89. ★ **返工过却没出方案表 → 必须硬拦**（v7.3.0：软层升级为硬层 B）')
+    print('   （v7.2.0 时这一层只提示、不阻塞 —— 于是"只要不写方案表就无人拦"，')
+    print('     正是用户实测到的那句"跳过"。）')
+    print('   ⚠️ **为什么现在敢硬**（这段是判据本身的依据，别删）：')
+    print('     · **假阳性（误拦）** = 把"没改写的章"判成"改写过的" → 卡住合法流程')
+    print('       → **绝对不能有**（有假阳性才是造假闸门）；')
+    print('     · **假阴性（漏拦）** = 把"改写过的章"漏掉 → 只是拦得不全 → **可以接受**。')
+    print('     `retryCount >= 1` 是**显式填写**的（`--retry N` 填了 1 就是真返工过 1 次），')
+    print('     **没有"把没返工的章写成 ≥1"的路径 → 无假阳性 → 可以当硬闸门**。')
+    print('     v7.2.0 那句"有漏报的判据不许当硬闸门"**过宽了**：漏报只是假阴性。')
+    print('   control 用 `有方案表 + retryCount=1`：证明拦的是"没有表"，')
+    print('   **不是"返工过"这件事本身**（否则返工过的章会被无差别卡住）。')
+    _p89a = _mk_rewrite_proj(_tmp / '_guard_rework_ok', plan='ok', workorder=1)
+    _r89a, _o89a = _run_gate(_p89a)
+    _p89b = _mk_rewrite_proj(_tmp / '_guard_rework_noplan', plan=None, workorder=1)
+    _r89b, _o89b = _run_gate(_p89b)
+    print(f'       control（有表·retryCount=1）exit={_r89a}（应 0）｜'
+          f'injected（删掉方案表）exit={_r89b}（应 1）')
+    # ⚠️ 断言用**阻塞项标记** `【返工过却没有改写方案表】`，且要求报出**病因**
+    #    （"返工过" + "打地鼠"）：只说"缺文件"就退回到 v7.2.0 的软措辞了。
+    _ok89 = ((_r89a == 0) and (_r89b == 1)
+             and ('【返工过却没有改写方案表】' in _o89b)
+             and ('返工过' in _o89b)
+             and ('打地鼠' in _o89b)            # 点名病因，不只是"缺个文件"
+             and ('返工轮次 = 1' in _o89b))      # 报出实际轮次（N），不说"≥1"含糊过去
+    print(f'  {"✓" if _ok89 else "✗"} 返工过必须有表  →  '
+          f'{"抓到（control 过 / 删表即拦 / 报出病因与轮次）" if _ok89 else "**没抓到！**"}')
+    if not _ok89:
+        print('       injected 输出尾部：', _o89b[-400:].replace('\n', ' / ')[:260])
+    results.append(_ok89)
+
+    print('90. ★ **防假阳性护栏：`retryCount = 0` 且无方案表 → 必须放行**')
+    print('   （★ 这条用例钉住的是"**闸门只拦明确返工过的章**"。')
+    print('     理由：在 `06-章节工单.md` 这个源里，**"没返工过"与"没填"分不清** ——')
+    print('     所以判据必须保守（宁可漏拦，绝不误拦）。')
+    print('     **谁哪天把判据加严成"所有章都必须有方案表"，这条用例立刻变红** ——')
+    print('     那会把合法流程全卡住（每一章都要补一张表 = 主编开始造假数据过检），')
+    print('     正是本项目最忌讳的"造假闸门"。）')
+    print('   附带第二半：`retryCount` 读不到（`?`）**同样不许拦**，但必须**留痕**')
+    print('     （v7.1.1：跳过必须留痕）—— "未知"既不是 0、也不是"返工过"。')
+    _p90a = _mk_rewrite_proj(_tmp / '_guard_retry0_noplan', plan=None, workorder=0)
+    _r90a, _o90a = _run_gate(_p90a)
+    _p90b = _mk_rewrite_proj(_tmp / '_guard_retry_unknown', plan=None, workorder='?')
+    _r90b, _o90b = _run_gate(_p90b)
+    print(f'       a（retryCount=0·无表）exit={_r90a}'
+          f'（**应 0 —— 拦住就是误拦**）｜'
+          f'b（retryCount=`?`·无表）exit={_r90b}'
+          f'（**应 0 —— 判不了不许当拦**）')
+    _ok90 = ((_r90a == 0) and (_r90b == 0)
+             and ('【返工过却没有改写方案表】' not in _o90a)
+             and ('【返工过却没有改写方案表】' not in _o90b)
+             and ('未知' in _o90b))          # `?` 必须留痕，不许静默
+    print(f'  {"✓" if _ok90 else "✗"} 未返工不误伤  →  '
+          f'{"抓到（0 放行 / `?` 放行但留痕）" if _ok90 else "**没抓到！误伤了**"}')
+    if not _ok90:
+        print('       a 输出尾部：', _o90a[-300:].replace('\n', ' / ')[:220])
+        print('       b 输出尾部：', _o90b[-300:].replace('\n', ' / ')[:220])
+    results.append(_ok90)
+
+    # ══════════════════════════════════════════════════════════════════
+    # 91–94：v7.4.0「闸门可信度」的**防回归用例**（本轮**只加用例**，不改被测脚本）
+    #   背景：用户拿**真实项目**跑出三处假通过 + 一处漏检，均已核实并修复：
+    #     ① `check_repetition.find_duplicates` 读失败 `return []` → 与"读了没重复"合并
+    #        → `check_file` 打印「[通过]」+ exit 0 —— **跳过伪装成通过**；
+    #     ② `check_repetition` 的 `extract_body` 漏传 `keep_blank=True` → 空行被压掉
+    #        → `split_paragraphs` **永远只切出 1 段** → 章内重复检测一直失效、每章都「[通过]」；
+    #     ③ `check_repetition._QUOTE_OPEN` 7 项里 5 项是重复的 ASCII 引号占位、
+    #        全角 `“`(U+201C) 缺失 → 全角引号写的对话行识别不到；
+    #     ④ `check_batch_gate` 的 `_split_md_row` + "只认第一个表头" → 分卷大纲的
+    #        **第二张表整表被跳过**（实测 42 行）→ 那 42 行的章末型红线形同不存在。
+    #   ★ 每条都按同一原则写：**用例内部自造输入 + 断言修复后的正确行为** ——
+    #     所以只要那处修复被回退，它立刻变红（不是"跟着修好的代码一起漂"的软用例）。
+    # ══════════════════════════════════════════════════════════════════
+
+    def _run_rep(path, *extra):
+        """跑 `check_repetition.py` → `(exit, stdout+stderr)`。"""
+        _r = subprocess.run([PY, '-X', 'utf8',
+                             str(SKILL / 'scripts' / 'check_repetition.py'),
+                             str(path), *extra],
+                            cwd=str(SKILL), capture_output=True, text=True,
+                            encoding='utf-8', errors='replace')
+        return _r.returncode, (_r.stdout or '') + (_r.stderr or '')
+
+    _REP_PARA = '风从巷口灌进来，晾在绳上的衣服翻了个面，水滴落在青石板上，溅起一小片灰。'
+
+    print('91. ★ **读失败必须非 0**（`check_repetition` 防"跳过伪装成通过"回归）')
+    print('   （用户实测：把**目录**当章节文件传进去，旧实现照样打「[通过]」并 exit 0。）')
+    print('   钉住的是 `find_duplicates` 的**三态**：`None`(没读到) 与 `[]`(读了没重复)')
+    print('   **不许合并** —— 回退到"读失败 `return []`"，它立刻退回 exit=0 + 「[通过]」。')
+    print('   control 传**同一个稿子**的**文件路径**：证明非 0 不是"脚本永远失败"。')
+    _p91 = _tmp / '_guard_rep_read_fail'
+    try:
+        _shx.rmtree(_p91)
+    except Exception:
+        pass
+    (_p91 / 'chapters').mkdir(parents=True, exist_ok=True)
+    _p91f = _p91 / 'chapters' / '第01章-正常.md'
+    _p91f.write_text('# 第01章 正常\n\n' + _REP_PARA + '\n', encoding='utf-8')
+    _r91a, _o91a = _run_rep(_p91f)              # control：传文件
+    _r91b, _o91b = _run_rep(_p91 / 'chapters')  # injected：传目录（读不到）
+    print(f'       control（传文件）exit={_r91a}（应 0）｜'
+          f'injected（传目录·读不到）exit={_r91b}（**应 != 0**）')
+    # ⚠️ 断言里的 `[通过]` 是**失败态的反面**：只要它出现，就说明"没读到"被当成了通过。
+    _ok91 = ((_r91a == 0) and ('[通过]' in _o91a)
+             and (_r91b != 0) and ('读取失败' in _o91b) and ('[通过]' not in _o91b))
+    print(f'  {"✓" if _ok91 else "✗"} 读失败不伪装通过  →  '
+          f'{"抓到（读不到即非 0，且不打印「[通过]」）" if _ok91 else "**没抓到！**"}')
+    if not _ok91:
+        print('       injected 输出尾部：', _o91b[-300:].replace('\n', ' / ')[:220])
+    results.append(_ok91)
+
+    print('92. ★ **章内重复必须查得出来**（`check_repetition` 防 `keep_blank` 回退）')
+    print('   （共享版 `extract_body` 默认**压掉空行** → 正文变一行 →')
+    print('     `re.split(r\'\\n\\s*\\n\')` 永远只得到 1 段 → 章内重复一处也查不出、')
+    print('     每章都打「[通过]」——又一个"看起来正常的假绿"。）')
+    print('   回退 `extract_body(text, keep_blank=True)` 这 2 行 → 下面这条注入稿')
+    print('   会退回 exit=0 + 「[通过]」。control 是**同样两段、但内容不同**。')
+    print('   ⚠️ 断言用 `处重复` **而不是**裸「重复」：`[通过] …：无重复段落` 里也有"重复"')
+    print('      —— 只认"重复"两个字会被通过态自己命中（本项目踩过两次的坑）。')
+    _p92 = _tmp / '_guard_rep_inner_dup'
+    try:
+        _shx.rmtree(_p92)
+    except Exception:
+        pass
+    _p92.mkdir(parents=True, exist_ok=True)
+    _p92bad = _p92 / '第01章-重复.md'
+    _p92ok = _p92 / '第01章-正常.md'
+    _p92bad.write_text('# 第01章 重复\n\n' + _REP_PARA + '\n\n' + _REP_PARA + '\n',
+                       encoding='utf-8')
+    _p92ok.write_text('# 第01章 正常\n\n' + _REP_PARA + '\n\n'
+                      '他蹲在门槛上，把最后一根火柴在鞋底上划了三下才点着。\n',
+                      encoding='utf-8')
+    _r92a, _o92a = _run_rep(_p92ok)
+    _r92b, _o92b = _run_rep(_p92bad)
+    print(f'       control（两段不同）exit={_r92a}（应 0）｜'
+          f'injected（两段逐字相同·空行分隔）exit={_r92b}（**应 != 0**）')
+    _ok92 = ((_r92a == 0) and ('[通过]' in _o92a)
+             and (_r92b != 0) and ('处重复' in _o92b) and ('[通过]' not in _o92b))
+    print(f'  {"✓" if _ok92 else "✗"} 章内重复可见  →  '
+          f'{"抓到（逐字相同被点出，控制稿仍放行）" if _ok92 else "**没抓到！**"}')
+    if not _ok92:
+        print('       injected 输出尾部：', _o92b[-300:].replace('\n', ' / ')[:220])
+    results.append(_ok92)
+
+    print('93. ★ **认得全角引号 `“`**（`check_repetition` 防 `_QUOTE_OPEN` 回退）')
+    print('   （原表 7 项里 5 项是重复的 ASCII 引号占位、全角 `“`(U+201C) 不在表里 →')
+    print('     用全角引号写的**对话类落笔**识别不到，会被判成「叙述」→')
+    print('     ③ 级"连续 ≥5 章全叙述落笔"与开场侧的"对话起手"两侧结论全失真。）')
+    print('   判据 = `check_endings` 逐章明细行里**第 03 章那一行**必须写 `[对话]`')
+    print('     （文案取自 `_classify_ending` 的真实返回值；回退后那一行变 `[叙述·…]`）。')
+    print('   control = 同一份稿子、只把末段换成叙述 → 第 03 章那行**不许**是 `[对话]`。')
+    _p93 = _tmp / '_guard_rep_quote'
+    try:
+        _shx.rmtree(_p93)
+    except Exception:
+        pass
+    (_p93 / 'chapters').mkdir(parents=True, exist_ok=True)
+    _c93_1 = ('# 第01章 一\n\n风从巷口灌进来，晾在绳上的衣服翻了个面，水滴落在青石板上。\n\n'
+              '他把火柴塞进兜里，指尖在兜口停了一下，没有回头。\n')
+    _c93_2 = ('# 第02章 二\n\n他蹲在门槛上数着剩下的火柴，一根一根摆成一排。\n\n'
+              '屋外那盏灯还亮着，他没回头看，只把门拢了拢。\n')
+    _c93_q = ('# 第03章 三\n\n炉子还在墙角，灶台上那道灰痕平得像什么都没发生过。\n\n'
+              '“明天还得去挨打。”他说完，把灯拧灭了，屋里只剩下巷口那一点光。\n')
+    _c93_n = ('# 第03章 三\n\n炉子还在墙角，灶台上那道灰痕平得像什么都没发生过。\n\n'
+              '他把灯拧灭了，屋里只剩下巷口那一点光，明天还得去挨打。\n')
+    _c93f = _p93 / 'chapters' / '第03章-三.md'
+    (_p93 / 'chapters' / '第01章-一.md').write_text(_c93_1, encoding='utf-8')
+    (_p93 / 'chapters' / '第02章-二.md').write_text(_c93_2, encoding='utf-8')
+    _c93f.write_text(_c93_q, encoding='utf-8')
+    _r93a, _o93a = _run_rep(_p93, '--all')
+    _c93f.write_text(_c93_n, encoding='utf-8')
+    _r93b, _o93b = _run_rep(_p93, '--all')
+    _line93 = [l for l in _o93a.split('\n')
+               if l.strip().startswith('第03章') and '[对话]' in l]
+    _line93n = [l for l in _o93b.split('\n')
+                if l.strip().startswith('第03章') and '[对话]' in l]
+    print(f'       control（末段叙述）exit={_r93b}（应 0）｜'
+          f'injected（末段全角引号）exit={_r93a}（应 0：这是识别题，不是拦截题）')
+    _ok93 = ((_r93a == 0) and bool(_line93) and (not _line93n))
+    print(f'  {"✓" if _ok93 else "✗"} 全角引号判对话  →  '
+          f'{"抓到（第 03 章落笔 = [对话]，叙述稿不误判）" if _ok93 else "**没抓到！**"}')
+    if not _ok93:
+        for _l in [x for x in _o93a.split('\n') if '第03章' in x][:3]:
+            print('       ', _l.strip()[:110])
+    results.append(_ok93)
+
+    print('94. ★ **多表大纲：第二张表的红线必须能检出**（`check_batch_gate` 防"只认第一个表头"）')
+    print('   （旧实现按 `|` 切完只认**扫描到的第一个表头**，后面几张表的行统统按')
+    print('     "列数与表头不一致"丢掉 —— 实测某真实项目丢掉 **42 行**，')
+    print('     那 42 行的「章末型 / 开场类型」红线**在这 42 行上形同不存在**。）')
+    print('   fixture：表1 **四列**（第 1–3 章）／表2 **五列**（第 3–6 章）——')
+    print('     ⚠️ 第 3 章**两张表都有**（分卷大纲的卷首回顾就是这种重叠）：')
+    print('       红线 1 取的是**按章号排序后的最后 3 行**，重叠若不放在尾部就不会')
+    print('       破坏"章号严格连续"这一条（重叠放在尾部会把判据整条压掉）。')
+    print('   表2 的第 4/5/6 章同章末型 → 必须点名 `第 4/5/6 章`；')
+    print('     回退"只认第一个表头"→ 表2 整表被判 skewed、这 3 章查不到，红线不报。')
+    print('   ⚠️ 同时断言 `[红线1·未检查]` **不出现** —— 它一出现就说明表 2 的行被跳过了。')
+    print('   control：同样两张表，但表2 三章章末型**互不相同** → 不许报红线。')
+
+    def _mk_multi_table_outline(base, last3=('丁·悬念', '丁·悬念', '丁·悬念')):
+        (base / '01-大纲.md').write_text(
+            '# 大纲\n\n## 第一卷\n\n'
+            '| 章节 | 标题 | 开场类型 | 章末型 |\n|---|---|---|---|\n'
+            '| 第 1 章 | A | 新起 | 甲·信息结算 |\n'
+            '| 第 2 章 | B | 承接 | 乙·动作收束 |\n'
+            '| 第 3 章 | C | 新起 | 甲·信息结算 |\n\n'
+            '## 第二卷\n\n'
+            '| 章节 | 标题 | 开场类型 | 章末型 | 备注 |\n|---|---|---|---|---|\n'
+            '| 第 3 章 | C | 承接 | 乙·动作收束 | 卷首回顾同一事件 |\n'
+            '| 第 4 章 | D | 续接 | %s |  |\n'
+            '| 第 5 章 | E | 新起 | %s |  |\n'
+            '| 第 6 章 | F | 承接 | %s |  |\n'
+            % (last3[0], last3[1], last3[2]),
+            encoding='utf-8')
+        return base
+
+    _p94a = _mk_multi_table_outline(
+        _mk_concrete_proj(_tmp / '_guard_multitable_ok', True, plot='pad2'),
+        last3=('甲·信息结算', '乙·动作收束', '丁·悬念'))
+    _r94a, _o94a = _run_gate(_p94a)
+    _p94b = _mk_multi_table_outline(
+        _mk_concrete_proj(_tmp / '_guard_multitable_dup', True, plot='pad2'))
+    _r94b, _o94b = _run_gate(_p94b)
+    print(f'       control（表2 三章不同型）exit={_r94a}（应 0）｜'
+          f'injected（表2 第 4/5/6 章同型）exit={_r94b}（应 1）')
+    _ok94 = ((_r94a == 0) and ('【崩坏红线 1】' not in _o94a)
+             and (_r94b == 1)
+             and ('【崩坏红线 1】' in _o94b)
+             and ('第 4/5/6 章' in _o94b)
+             and ('[红线1·未检查]' not in _o94a)
+             and ('[红线1·未检查]' not in _o94b))
+    print(f'  {"✓" if _ok94 else "✗"} 多表红线  →  '
+          f'{"抓到（表2 的第 4/5/6 章被点名，两表都被读到）" if _ok94 else "**没抓到！**"}')
+    if not _ok94:
+        for _l in [x for x in _o94b.split('\n')
+                   if '红线' in x or '第 4 章' in x or '第 5 章' in x][:6]:
+            print('       ', _l.strip()[:130])
+    results.append(_ok94)
+
+    # ── 95–98：v7.5.0「改写方案的精度」的防回归用例 ────────────────────────
+    # ★ 真实依据（用户项目实测）：10 章的方案表四列**逐字相同** ——
+    #   `| 1 | 落笔/句式缺陷 | U2 | 章末或指定句 | 见三行对照 | 事件／信息／接口不变 |`
+    #   表填满了、格式全对、**旧闸门全过**，而"先把耦合算清楚"的作用 = 0。
+    #   根因：旧校验只查"字段在不在、格式对不对"，**没规定内容精度**
+    #   → "填满字段"成了唯一要求 → 表格退化成模板 → 改的时候没有具体目标。
+    _PLAN_HEAD_V2 = '| # | 缺陷项 | 单元 | 定位 | 改成什么 | 预期改善 |'
+
+    def _plan_text_cells(*, defect='平均句长 21（<23）', loc='第 3 段',
+                         how='动作后补一句环境／身体感受', gain='句长↑ / p90↑',
+                         head=None, unit='U1'):
+        """可**逐格指定**的方案表 fixture（v7.5.0 内容精度用例专用）。
+
+        默认每一格都是**合格值**（故 control 应 exit=0）；改哪一格就测哪一条判据。
+        """
+        _h = head if head is not None else _PLAN_HEAD_V2
+        return ('# 第 01 章 改写方案\n\n'
+                '> 依据：`check_human_rhythm.py` 报告（2026-10-12）｜轮次：1\n\n'
+                + _h + '\n|---|---|---|---|---|---|\n'
+                + f'| 1 | {defect} | {unit} | {loc} | {how} | {gain} |\n\n'
+                '---\n\n'
+                '### #1\n'
+                '- 改前：他把火柴塞进兜里。\n'
+                '- 改后：他把火柴塞进兜里，指尖在兜口停了一下。外面那盏灯还亮着，他没回头看。\n'
+                '- 为什么更好：U1 插入——原句之后补进"身体感受 + 周围环境"，句长 9 → 41 字。\n')
+
+    def _mk_precision_proj(base, **kw):
+        """在 `_mk_concrete_proj` 之上换掉方案表（其余全绿，保证 control=exit 0）。"""
+        _mk_concrete_proj(base, True, plot='pad2')
+        _d = base / 'chapters' / '_meta'
+        _d.mkdir(parents=True, exist_ok=True)
+        (_d / '第01章-改写方案.md').write_text(_plan_text_cells(**kw), encoding='utf-8')
+        (base / '06-章节工单.md').write_text(_workorder_text(0), encoding='utf-8')
+        return base
+
+    print('95. ★ **"填满了但没信息"的方案表必须被拦**（v7.5.0 内容精度）')
+    print('   （用户项目的原样表：`落笔/句式缺陷` / `章末或指定句` / `见三行对照` /')
+    print('     `事件／信息／接口不变` —— 10 章 × 2–3 行**逐字相同**。）')
+    print('   钉住 `check_plan_precision` 的三条硬判据：**空话黑名单 / 定位有没有数到段句 /')
+    print('     `预期改善` 是否只写了"不变"**。回退它们 → 这张表会退回 exit=0。')
+    _p95a = _mk_precision_proj(_tmp / '_guard_plan_hollow',
+                               defect='落笔/句式缺陷', loc='章末或指定句',
+                               how='见三行对照', gain='事件／信息／接口不变')
+    _rp95, _op95 = _run_gate(_p95a)
+    _p95b = _mk_precision_proj(_tmp / '_guard_plan_precise')     # control：逐格具体
+    _rc95, _oc95 = _run_gate(_p95b)
+    print(f'       control（逐格具体）exit={_rc95}（应 0）｜'
+          f'injected（模板表）exit={_rp95}（**应 1**）')
+    _ok95 = (_rc95 == 0 and _rp95 == 1
+             and ('【改写方案表不合规】' in _op95)
+             and ('空话' in _op95)
+             and ('rewrite-units.md' in _op95))
+    print(f'  {"✓" if _ok95 else "✗"} 模板表被拦  →  '
+          f'{"抓到（报「空话」并指向 4.0.2）" if _ok95 else "**没抓到！**"}')
+    if not _ok95:
+        print('       injected 输出尾部：', _op95[-300:].replace('\n', ' / ')[:220])
+    results.append(_ok95)
+
+    print('96. ★ **旧表头「会影响」必须仍被接受**（防"改列名把既有项目全判死"）')
+    print('   （v7.5.0 把最后一列改名 `会影响` → `预期改善`（歧义有 10 章实证）；')
+    print('     但既有项目的表用的是旧名 —— **不许因为改名让它们突然全红**。）')
+    print('   判据：`PLAN_HEAD_ACCEPTED` 收两套表头。回退成只认新名 → 本用例 exit=1。')
+    _p96 = _mk_precision_proj(_tmp / '_guard_plan_oldhead',
+                              head='| # | 缺陷项 | 单元 | 定位 | 改成什么 | 会影响 |')
+    _r96, _o96 = _run_gate(_p96)
+    print(f'       旧表头 + 逐格合格 exit={_r96}（**应 0**）')
+    _ok96 = (_r96 == 0)
+    print(f'  {"✓" if _ok96 else "✗"} 旧表头仍被接受  →  '
+          f'{"抓到（不因改名判死旧表）" if _ok96 else "**没抓到！**"}')
+    if not _ok96:
+        print('       输出尾部：', _o96[-260:].replace('\n', ' / ')[:200])
+    results.append(_ok96)
+
+    print('97. **「定位」形态：范围写法要放行**（防判据被收窄成"只认单个段号"）')
+    print('   （U6 段群级的改写会写"第 3–5 段" —— 把判据收窄成只认 `第 N 段`')
+    print('     会把合法值判死，正是本项目最忌讳的"误拦"。）')
+    _p97a = _mk_precision_proj(_tmp / '_guard_plan_loc_range', loc='第 3–5 段')
+    _r97a, _o97a = _run_gate(_p97a)
+    _p97b = _mk_precision_proj(_tmp / '_guard_plan_loc_multi', loc='多处')
+    _r97b, _o97b = _run_gate(_p97b)
+    print(f'       范围写法 exit={_r97a}（**应 0**）｜'
+          f'"多处" exit={_r97b}（**应 1**）')
+    _ok97 = (_r97a == 0 and _r97b == 1 and ('定位' in _o97b))
+    print(f'  {"✓" if _ok97 else "✗"} 定位形态  →  '
+          f'{"抓到（范围放行、「多处」拦下）" if _ok97 else "**没抓到！**"}')
+    results.append(_ok97)
+
+    print('98. ★ **黑名单是"整格等于"不是"包含"**（防子串匹配误伤合法值）')
+    print('   （`章末落笔公式化` **含"落笔"**但是**合法值** —— 子串匹配会把它判死；')
+    print('     只有整格等于 `落笔/句式缺陷` 这类固定空话才算不合格。）')
+    _p98a = _mk_precision_proj(_tmp / '_guard_plan_substr', defect='章末落笔公式化')
+    _r98a, _o98a = _run_gate(_p98a)
+    _p98b = _mk_precision_proj(_tmp / '_guard_plan_exact', defect='落笔/句式缺陷')
+    _r98b, _o98b = _run_gate(_p98b)
+    print(f'       "章末落笔公式化"（含"落笔"）exit={_r98a}（**应 0 —— 误拦就是错**）｜'
+          f'"落笔/句式缺陷" exit={_r98b}（应 1）')
+    _ok98 = (_r98a == 0 and _r98b == 1)
+    print(f'  {"✓" if _ok98 else "✗"} 整格匹配不误伤  →  '
+          f'{"抓到（合法值放行、空话拦下）" if _ok98 else "**没抓到！**"}')
+    results.append(_ok98)
+
+    # ── v7.6.0「世界引擎」：三站接线的最后两站（交付点 + 校验点）──────────
+    # 背景：实测《秘典大盗》规则书 —— 声音层占 29% 字数、机制层 45%，我们对应 0 / 4%。
+    # 生成点由 `voice-charter.md` / `world-engine.md` / `bible-template.md` 定，
+    # 这里守的是**交付点**（任务包槽位）与**校验点**（check_worldbuilding【4】【5】）。
+    #
+    # ⚠️ 三处都问"**有没有一处合规**"，不要用 `'声音样本' in out` 这种子串断言 ——
+    #    本项目已有两次"断言命中注释/说明文字"的假通过（见用例 78/80 的注释）。
+    _CARD_VALS = {'名称': '「井绳」，断裂计数', '能做什么': '记数，断口记上一次在场者数目。',
+                  '代价': '换新绳的人自己出六个铜子，旧计数作废。',
+                  '边界': '只记数、不指认；换绳后彻底失效。',
+                  '触发条件': '第四十三场雨落下的当天早上第一次打水。',
+                  '会引发什么冲突': '要证明当年是三个人，就得让井绳再断一次。'}
+    _CARD_KEYS = ('名称', '能做什么', '代价', '边界', '触发条件', '会引发什么冲突')
+    # 样本用重复句拼出来：control 需要 ≥300 字（这里 18×30 ≈ 540 字），
+    # 又不能让 literal 把测试文件撑爆。
+    _VC_SENT = '灰炉村的雨是有数的，一年四十三场，多一场少一场，账上都记着。'
+    _VC_SAMPLE = _VC_SENT * 18
+
+    def _mk_voice_proj(base, *, charter=True, sample=None, drop_card_field=None):
+        """造一个"圣经含 `## 〇、口吻宪法` + 机制卡"的最小项目（v7.6.0 fixture）。
+
+        `charter=False`      → 删掉整个口吻宪法段（注入：声音层没有落点）
+        `sample='很短'`      → 换掉声音样本（注入：有段但样本 <300 字）
+        `drop_card_field='X'`→ 从 `#### 卡 1` 里去掉一格（注入：机制卡六格缺一）
+
+        ⚠️ 用"按字段表生成、跳过某一格"来注入，**不是**先写全再 replace 成 `QQQ`：
+           本文件被守卫自己扫，且全库禁止残留 `QQQ`（会污染下一步的残留检查）。
+        """
+        try:
+            _shx.rmtree(base)
+        except Exception:
+            pass
+        (base / 'chapters').mkdir(parents=True, exist_ok=True)
+        (base / 'chapters' / '第01章-测试.md').write_text(
+            '# 第01章 测试\n\n风从巷口灌进来，晾在绳上的衣服翻了个面，水滴落在青石板上。\n',
+            encoding='utf-8')
+        (base / '02-写作计划.json').write_text(json.dumps({
+            'costMode': 'standard', 'minWordsPerChapter': 2000,
+            'chapters': [{'chapterNumber': 1, 'status': 'completed', 'wordCountPass': True}],
+        }, ensure_ascii=False), encoding='utf-8')
+
+        charter_sec = ''
+        if charter:
+            charter_sec = (
+                '## 〇、口吻宪法\n\n'
+                '### 叙述者人格\n\n- **谁在讲**：一个在灰炉村收了二十年废料的独眼账房。\n\n'
+                '### 声音样本（300–500 字）\n\n'
+                + (_VC_SAMPLE if sample is None else sample) + '\n\n'
+                '### 语域禁令\n\n- 书面语讲解腔（"综上所述""值得注意的是"）\n\n')
+        card = ('### 机制卡\n\n#### 卡 1\n\n'
+                + '\n'.join(f'**{k}**：{_CARD_VALS[k]}' for k in _CARD_KEYS
+                            if k != drop_card_field) + '\n\n')
+        (base / '00-故事圣经.md').write_text(
+            '# 灰炉账本 — 故事圣经\n\n' + charter_sec + '## 一、世界观手册\n\n'
+            '灰炉村被废料堆围着。废料不是垃圾，是别处淘汰下来、还能用的东西。\n\n' + card,
+            encoding='utf-8')
+        return base
+
+    def _run_pkg(*argv):
+        _r = subprocess.run([PY, '-X', 'utf8',
+                             str(SKILL / 'scripts' / 'make_task_package.py')] + list(argv),
+                            cwd=str(SKILL), capture_output=True, text=True,
+                            encoding='utf-8', errors='replace')
+        return _r.returncode, (_r.stdout or '') + (_r.stderr or '')
+
+    def _run_wb(proj):
+        """跑 `check_worldbuilding --json`，返回 (exit, stdout)。"""
+        _r = subprocess.run([PY, '-X', 'utf8',
+                             str(SKILL / 'scripts' / 'check_worldbuilding.py'), str(proj), '--json'],
+                            cwd=str(SKILL), capture_output=True, text=True,
+                            encoding='utf-8', errors='replace')
+        return _r.returncode, (_r.stdout or '')
+
+    def _wb_problems(out):
+        """取 `--json` 的 problems 列表（解析失败返回 None，让断言判失败而不是崩）。"""
+        try:
+            return json.loads(out).get('problems', [])
+        except Exception:
+            return None
+
+    def _slot_body(text, key):
+        m = re.search(r'<!-- slot:' + key + r' [^>]*-->(.*?)<!-- /slot:' + key + r' -->',
+                      text, re.S)
+        return m.group(1) if m else ''
+
+    def _fill_other_todos(text):
+        """把 `【待填…】` 换成一句说明，**但保留 `voice_charter` 槽位原样**。
+
+        为什么需要这一步：一份刚编译出来的任务包里，`ledger` / `world_pack` / `lesions` …
+        **本来就该是待填**（它们是主编槽位，脚本永远填不了）→ 照原样跑 `--check` **永远不可能 0**。
+        把它们填掉之后，**唯一的变量就只剩 `voice_charter`** ——
+        control 的"放行"与注入的"拒绝开工"才是在测**同一条判据**。
+
+        ⚠️ `voice_preset` 还要**单独补一次**：它除了"不许待填"之外，另有一条硬判据
+           （**三行核心必须齐**：具体坐标／叙述者立场／留白点，见 `check_one`）——
+           不补的话 control 会因为**另一个槽位**失败，用例就成了
+           "我以为在测 voice_charter，其实测的是 voice_preset"。
+        """
+        m = re.search(r'<!-- slot:voice_charter [^>]*-->.*?<!-- /slot:voice_charter -->',
+                      text, re.S)
+        _fix = lambda s: re.sub(r'【待填[^】]*】', '（本用例不适用）', s)   # noqa: E731
+        if m:
+            text = _fix(text[:m.start()]) + m.group(0) + _fix(text[m.end():])
+        else:
+            text = _fix(text)
+        return re.sub(
+            r'<!-- slot:voice_preset [^>]*-->.*?<!-- /slot:voice_preset -->',
+            '<!-- slot:voice_preset budget=300 required=1 -->\n'
+            '- 具体坐标：井绳断口\n- 叙述者立场：护短\n- 留白点：白卫带走了谁\n'
+            '<!-- /slot:voice_preset -->',
+            text, flags=re.S)
+
+    print('99. ★ **口吻宪法缺失 → 任务包 `voice_charter` 变【待填】、`--check` 拒绝开工**')
+    print('   （v7.6.0 的**交付点**：圣经有 `## 〇、口吻宪法` → 脚本抽进包；没有 → TODO。')
+    print('     control 同时钉住另外两件事：槽位总数 **18/18**、且它**排在 `batch_global` 之前**'
+          '（位置是有意的：声音管每一句，其他正向素材只管这一章/这一批）。）')
+    _p99a = _mk_voice_proj(_tmp / '_guard_voicecharter_ok')
+    _ra99, _oa99 = _run_pkg(str(_p99a), '--chapter', '1', '--write')
+    _pkg99 = _p99a / '任务包' / '第01章-任务包.md'
+    _t99 = _pkg99.read_text(encoding='utf-8') if _pkg99.is_file() else ''
+    _cc99 = _p99a / '任务包' / '第01章-任务包-已填其余槽位.md'
+    _cc99.write_text(_fill_other_todos(_t99), encoding='utf-8')
+    _rc99, _oc99 = _run_pkg(str(_p99a), '--check', str(_cc99))
+
+    _p99b = _mk_voice_proj(_tmp / '_guard_voicecharter_missing', charter=False)
+    _rb99, _ob99 = _run_pkg(str(_p99b), '--chapter', '1', '--write')
+    _pkg99b = _p99b / '任务包' / '第01章-任务包.md'
+    _t99b = _pkg99b.read_text(encoding='utf-8') if _pkg99b.is_file() else ''
+    _cc99b = _p99b / '任务包' / '第01章-任务包-已填其余槽位.md'
+    _cc99b.write_text(_fill_other_todos(_t99b), encoding='utf-8')
+    _rc99b, _oc99b = _run_pkg(str(_p99b), '--check', str(_cc99b))
+
+    _body99 = _slot_body(_t99, 'voice_charter')
+    _body99b = _slot_body(_t99b, 'voice_charter')
+    _order99 = (_t99.find('<!-- slot:voice_charter') >= 0
+                and _t99.find('<!-- slot:batch_global') >= 0
+                and _t99.find('<!-- slot:voice_charter') < _t99.find('<!-- slot:batch_global'))
+    print(f'       control（有口吻宪法）exit={_rc99}（**应 0**）｜'
+          f'注入（无口吻宪法）exit={_rc99b}（**应 1**）')
+    print(f'       control 槽位行：'
+          f'{[l.strip() for l in _oc99.splitlines() if l.strip().startswith("槽位 18/")]}')
+    print(f'       control voice_charter 有样本块={"声音样本" in _body99}｜'
+          f'排在 batch_global 之前={_order99}｜'
+          f'注入为待填={"【待填" in _body99b}')
+    _ok99 = (_rc99 == 0
+             and '槽位 18/18' in _oc99
+             and '声音样本' in _body99
+             and '【待填' not in _body99
+             and '旧项目补一段口吻宪法即可' in _body99b
+             and _rc99b == 1
+             and '槽位 `voice_charter` 还是待填状态' in _oc99b
+             and '槽位 18/18' in _oc99b
+             and _order99)
+    print(f'  {"✓" if _ok99 else "✗"} 口吻宪法交付点  →  '
+          f'{"抓到（有→18/18 放行且在 batch_global 前；无→待填+拒绝开工）" if _ok99 else "**没抓到！**"}')
+    if not _ok99:
+        print('       control 输出：', _oc99[-300:].replace('\n', ' / ')[:260])
+        print('       注入 输出：', _oc99b[-300:].replace('\n', ' / ')[:260])
+    results.append(_ok99)
+
+    print('100. **口吻宪法有段、但声音样本 <300 字 → `check_worldbuilding`【4】必须报警**')
+    print('   （治的正是"**只有人格定义、没有样本 = 等于没写**"：抽象描述不激活语域，')
+    print('     文本样本才激活。**硬**=段在+三子段齐+样本≥300 字；**软**=样本<500 字只提示。')
+    print('     ⚠️ "样本好不好"**不判** —— 那是质检子代理/人的活。）')
+    _p100a = _mk_voice_proj(_tmp / '_guard_voicesample_ok')
+    _ra100, _oa100 = _run_wb(_p100a)
+    _p100b = _mk_voice_proj(_tmp / '_guard_voicesample_short', sample='灰炉村的雨是有数的。')
+    _rb100, _ob100 = _run_wb(_p100b)
+    _pl100a, _pl100b = _wb_problems(_oa100), _wb_problems(_ob100)
+    _hit100a = [p for p in (_pl100a or []) if '声音样本' in p]
+    _hit100b = [p for p in (_pl100b or []) if '声音样本' in p]
+    print(f'       control（样本 540 字）命中"声音样本"问题 {len(_hit100a)} 条（**应 0**）｜'
+          f'注入（样本 10 字）命中 {len(_hit100b)} 条（**应 1**）')
+    print(f'       注入实际报文：{_hit100b[:1]}')
+    _ok100 = (_pl100a is not None and _pl100b is not None
+              and not _hit100a
+              and len(_hit100b) == 1
+              and '判据 300' in _hit100b[0])
+    print(f'  {"✓" if _ok100 else "✗"} 无样本被拦  →  '
+          f'{"抓到（≥300 放行 / <300 报硬问题）" if _ok100 else "**没抓到！**"}')
+    if not _ok100:
+        print('       注入 输出尾部：', _ob100[-300:].replace('\n', ' / ')[:260])
+    results.append(_ok100)
+
+    print('101. **机制卡六格缺一格 → `check_worldbuilding`【5】必须报警**')
+    print('   （六格是**接口契约（字段名逐字）**，缺一格就是"描写不是机制"。')
+    print('     **硬**=每张卡六格齐备；**软**=张数低于密度判据只提示（机制卡按批次生长）。')
+    print('     ⚠️ "这一格写得对不对 / 能不能推出冲突"**不判**。）')
+    _p101a = _mk_voice_proj(_tmp / '_guard_card_ok')
+    _ra101, _oa101 = _run_wb(_p101a)
+    _p101b = _mk_voice_proj(_tmp / '_guard_card_missing', drop_card_field='代价')
+    _rb101, _ob101 = _run_wb(_p101b)
+    _pl101a, _pl101b = _wb_problems(_oa101), _wb_problems(_ob101)
+    _hit101a = [p for p in (_pl101a or []) if '机制卡 第' in p]
+    _hit101b = [p for p in (_pl101b or []) if '机制卡 第' in p]
+    print(f'       control（六格齐）命中"机制卡缺字段"问题 {len(_hit101a)} 条（**应 0**）｜'
+          f'注入（删「代价」）命中 {len(_hit101b)} 条（**应 1**）')
+    print(f'       注入实际报文：{_hit101b[:1]}')
+    _ok101 = (_pl101a is not None and _pl101b is not None
+              and not _hit101a
+              and len(_hit101b) == 1
+              and '代价' in _hit101b[0])
+    print(f'  {"✓" if _ok101 else "✗"} 机制卡缺格被拦  →  '
+          f'{"抓到（六格齐放行 / 缺一格报硬问题）" if _ok101 else "**没抓到！**"}')
+    if not _ok101:
+        print('       注入 输出尾部：', _ob101[-300:].replace('\n', ' / ')[:260])
+    results.append(_ok101)
+
     for _d in (_p18, _p19, _p21, _p78, _p78b, _p79, _p80, _p80b, _p80c, _p81, _p82,
-               _p86a, _p86b, _p86c, _p87a, _p87b, _p87c, _p88a, _p88b, _p88c):
+               _p86a, _p86b, _p86c, _p87a, _p87b, _p87c, _p88a, _p88b, _p88c,
+               _p89a, _p89b, _p90a, _p90b,
+               _p91, _p92, _p93, _p94a, _p94b,
+               _p95a, _p95b, _p96, _p97a, _p97b, _p98a, _p98b,
+               _p99a, _p99b, _p100a, _p100b, _p101a, _p101b):
         try:
             _shx.rmtree(_d)
         except Exception:

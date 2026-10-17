@@ -23,6 +23,9 @@
 | 规划章节结构（超长篇 2000+ 章） | `guides/plot-structures.md` + **`guides/volume-arc-planning.md`**（卷/弧/市场验证/锁死留白） | `guides/outline-template.md` |
 | 写人物档案 | `guides/character-template.md` | `guides/character-building.md` |
 | 写故事圣经 | `guides/bible-template.md` | — |
+| ★ **造世界 / 需要新造地点·势力·机制时**（v7.6.0 新增） | **`guides/world-engine.md`** —— **提问式世界生成器**（5 个必答问题，答完就"够开始写"）+ **实体卡六格**（`名称`／`能做什么`／**`代价`**／**`边界`**／`触发条件`／**`会引发什么冲突`**）+ 四类「**创造**」程序 + 命名学。★ **硬判据：每张卡必须能推出至少一个具体冲突**——推不出就是**描写**不是机制 | **`guides/bible-template.md`** 的 `### 机制卡`（容器与段落格式）· **`guides/material-pool.md`**（名字与术语从素材池抽，不凭想象） |
+| ★ **写/补「口吻宪法」（本书的声音）**（v7.6.0 新增） | **`guides/voice-charter.md`** —— 叙述者人格四格（谁在讲／对世界的态度／惯用句式／**他不做什么**）+ **`### 声音样本（300–500 字）`** + 语域禁令；**硬上限 2000 字，每章常驻**。★ 判据：**必须有样本块**（只有定义 = 等于没写——抽象描述不激活语域，**文本样本才激活**） | **`guides/bible-template.md`** 的 `## 〇、口吻宪法`（落盘位置）· 编译器抽进任务包**常驻槽位** `voice_charter` |
+| ★ **任何"示例"入库 / 挑范本片段**（v7.6.0 新增） | **`guides/material-pool.md`** —— **三档标注**：`【来源：<出处>】`／`【本书取样：第NN章】`／`【示例（编造，仅示格式）】`。**不许无声地编**（本项目已证"用 AI 编的范例教写作 = 用 AI 味培养 AI 味"） | 两个来源：外部 `guides/human-exemplars.md`／本书 `细纲/_最佳段落库.md`（**先本书后人类**） |
 | **创建/更新创作台账** | `guides/creation-ledger.md` | — |
 | **每章动笔前（seam 重读）** | `05-创作台账.md`（五段全文） | `guides/creation-ledger.md` |
 | **动笔写任何一章前** | `guides/writing-mindset.md` + **`guides/concrete-voice.md`** | `guides/chapter-template.md` |
@@ -41,6 +44,7 @@
 | **节律/词汇检测超标后修改** | **`guides/rewrite-playbook.md`**（脚本报哪项超就翻哪节，按招改） | `guides/human-rhythm.md`（规则原理解释） |
 | **"读着还是 AI 味"（表层指标已达标）** | **`guides/post-polish.md`**（后精修 4 工序：长句缝合/定指替换/长对话补足/节奏起伏）——治**深度分布指标**（超长句占比/p90/节奏CV/中文量词/长对话/数字） | `guides/concrete-voice.md`（具体性原理） |
 | AI 味重需清洗 / 修改前的指令措辞 | `guides/deai-workflow.md` + **`guides/occupancy-rewrite.md`** | — |
+| ★ **场景：用户说"像 AI / 文笔差 / 对话僵硬"（去 AI 味修复）**（v7.3.0 新增） | **`guides/deai-entry.md`**（**入口规程·五步顺序**：全局视图 → 11 项量表 → 四层顺序改 + 方案表 → 独立子代理四问 → 三行对照 + 复跑；**三条禁令**：禁止自己挑句子／禁止跳过全局视图／禁止不留对照就宣称改完） | `guides/rewrite-units.md` + `guides/ai-taste-selfcheck.md` |
 | ★ **改写 / 修改（脚本报了超标项，要动手改）**（v7.2.0 新增） | **`guides/rewrite-units.md`** —— **先选单元与边界**：U1 句级·插入／U2 句级·替换／U3 句级·换物／U4 对话段·重写／**U5 段落级·重写／U6 段群·重写**（后两个是体系此前缺的**「重写档」**）；**先粗后细：U5/U6 → U3 → U1/U2/U4**；**U5/U6 带强边界**——保功能／事件／信息／接口，**单段／连续 2–4 段、不许一次重写整章**。**改前出「修改方案表」（治指标耦合）→ 改后做「改前改后三行对照」（治看不见效果）** | **`guides/rewrite-playbook.md`**（**句级招式**：脚本报哪项翻哪节 + A/B 两套顺序） |
 | ★ **批末 · 本书最佳段落库**（v7.2.0 新增，每批一次） | **`guides/rewrite-units.md`**（**按缺陷类型调取样例**——报"缺闲笔"就调 `缺闲笔` 那一类；与「三层锚」分工：三层锚＝文风代表段／本库＝**手术样例**） | **`flows/phase3-writing.md`** 批末动作（清单 `7.7`／SKILL 动作 `10.8`） |
 | **生成细纲 / 章节任务卡 / 派发子代理任务包**（这些本质都是"对 LLM 的写作指令"） | **`guides/prompt-engineering.md`**（5 原则，防止指令本身诱导 AI 味——你写"补充细节"它就用破折号补刀，你写"写具体"它就写"一个人"） | — |

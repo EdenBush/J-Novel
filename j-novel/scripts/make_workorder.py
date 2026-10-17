@@ -32,6 +32,15 @@ python scripts/make_workorder.py <项目> --archive 5 --retry 1
 - 把一行**工单**追加进 `04-质检档案.md` 的汇总表（**消掉人肉转抄**）
 - **`--retry`** 把 `retryCount` / 返工轮次**落盘**（此前它只存在于铁律七的规则描述里，从未被记录）
 
+⚠️ **2026-10-10 v7.3.0：`--retry` 不填时不再记 0，改记「未知」（`?`）。**
+  为什么改：旧默认值 0 让"**没填**"与"**真的是 0**"在工单里**长得一样** →
+  `check_batch_gate.py` 分不出这一章到底返工过没有，于是那条"返工过 → 必须交出
+  改写方案表"的校验只能做提示、不能做闸门（一个软闸门 = 用户实测到的"跳过"）。
+  分成两种写法之后：**`?` = 未知（判不了）／`0` = 明确知道没返工** ——
+  前者既不当 0、也不当"返工过"（判据必须保守），只**留痕**（v7.1.1：跳过必须留痕）。
+  ⚠️ **读取方必须一起改口径**：`report()` 里 `?` **不参与返工轮次统计**、
+  也**不假装是 0**（两边口径不一致就是本 SKILL 最忌讳的"双载体不一致"）。
+
 ### ② `--report` —— 良率 + 缺陷帕累托 + 成本回填
 
 ```bash
@@ -45,6 +54,8 @@ python scripts/make_workorder.py <项目> --report
 用法:
   python make_workorder.py <项目> --archive <章号> [--retry N]   # 质检+归档（每章一次）
   python make_workorder.py <项目> --report [--since YYYY-MM-DD]  # 良率+帕累托+成本
+  ⚠️ `--retry` **不填 = 记「未知」（`?`），不是记 0** —— 返工轮次必须**当场**写，
+     事后回想补不回来（一次合格率会永远按"未知"算）。
 退出码: 0 = 正常；1 = 本次归档存在机械缺陷（不等于失败，是"这一章有缺陷，已登记"）；2 = 环境问题
 """
 
@@ -77,6 +88,12 @@ MECH = [
 ]
 COLS = ['章节', '字数', '机械结论', '缺陷类型', '返工轮次', '备注']
 CH_RX = re.compile(r'第\s*(\d{1,4})\s*章')
+# 返工轮次的**未知标记**（v7.3.0）：`--retry` 未指定时写它。
+# ⚠️ 必须与 `check_batch_gate.UNKNOWN_RETRY` 逐字一致 —— 两边不一致 =
+#    "双载体不一致"（本 SKILL 零容忍）：闸门会认不出这个标记，把它当非数字，
+#    于是"未知"在报告里彻底消失（静默失败）。
+# ⚠️ 它**不与任何合法轮次数冲突**（合法值是 0,1,2,… 的十进制整数）。
+UNKNOWN_RETRY = '?'
 
 
 def _run(script: str, args, cwd: Path):
@@ -101,7 +118,7 @@ def chapter_file(proj: Path, n: int):
     return None
 
 
-def archive(proj: Path, n: int, retry: int, quiet: bool) -> int:
+def archive(proj: Path, n: int, retry, quiet: bool) -> int:
     f = chapter_file(proj, n)
     if f is None:
         print(f'[错误] 找不到第 {n} 章的正文文件（期望 chapters/第{n:02d}章-*.md）。')
@@ -140,9 +157,13 @@ def archive(proj: Path, n: int, retry: int, quiet: bool) -> int:
             encoding='utf-8')
 
     txt = read_text(wo)
+    # ⚠️ v7.3.0：`retry is None`（未指定 `--retry`）→ 写**未知标记** `?`，**绝不写 0**。
+    #    "0" 是一个**断言**（"我知道这一章没返工"）；"?" 才是事实（"没人填"）。
+    #    用 0 顶替"没填"= 用一个假数据混进良率统计，而且闸门看不出来（v7.2.0 的教训）。
+    _retry_cell = UNKNOWN_RETRY if retry is None else str(retry)
     row = (f'| 第{n}章 | {words or "?"} | '
            f'{"全绿" if not defects else f"{len(defects)} 项"} | '
-           f'{"—" if not defects else "、".join(defects)} | {retry} | |')
+           f'{"—" if not defects else "、".join(defects)} | {_retry_cell} | |')
     # 幂等：同章已有行 → 替换（重跑归档不叠加）
     lines = txt.split('\n')
     hit = None
@@ -158,13 +179,21 @@ def archive(proj: Path, n: int, retry: int, quiet: bool) -> int:
         action = '追加'
     wo.write_text('\n'.join(lines), encoding='utf-8')
 
+    # ⚠️ 这条警告**不受 `--quiet` 抑制**：它是"数据永久丢失"的警告，不是例行输出。
+    if retry is None:
+        print(f'  ⚠ 未指定 --retry（返工轮次），本次归档的该字段记为"未知"'
+              f'（`{UNKNOWN_RETRY}`）—— 一次合格率将按"未知"处理，不按 0。'
+              f' 现在不补，这一章的返工轮次就**永久丢了**'
+              f'（重跑 `--archive {n} --retry N` 可覆盖本行）。')
+
     if not quiet:
         print(f'  {action}工单：第{n}章')
         for label, code in results:
             print(f'    {"✓" if code == 0 else "✗"} {label}')
         print(f'    → {"全绿" if not defects else "缺陷：" + "、".join(defects)}'
-              f'｜返工轮次 {retry}')
-        if retry >= 2:
+              f'｜返工轮次 {UNKNOWN_RETRY if retry is None else retry}'
+              f'{"（未知）" if retry is None else ""}')
+        if retry is not None and retry >= 2:
             print('    ⚠️ 返工轮次 ≥2 → 按铁律七**禁止原路重走**（换路或上报）。')
     return 1 if defects else 0
 
@@ -186,15 +215,21 @@ def report(proj: Path, since: str) -> int:
     ok = sum(1 for r in rows if r[2] == '全绿')
     defects = Counter()
     retries = []
+    unknown_n = 0       # ★ v7.3.0：返工轮次为"未知"（`?`／空／非数字）的章数
     for r in rows:
         if r[3] not in ('—', '', '-'):
             for d in re.split(r'[、,，]', r[3]):
                 if d.strip():
                     defects[d.strip()] += 1
+        _raw = (r[4] if len(r) > 4 else '').strip()
+        if _raw in ('', UNKNOWN_RETRY, '-'):
+            # ⚠️ 未知 ≠ 0：既不进 `retries`（会拉低中位）、也不当成"首次合格"。
+            unknown_n += 1
+            continue
         try:
-            retries.append(int(r[4]))
+            retries.append(int(_raw))
         except Exception:
-            pass
+            unknown_n += 1
     n = len(rows)
 
     print('=' * 70)
@@ -209,6 +244,12 @@ def report(proj: Path, since: str) -> int:
         print('      只改头部那 1–2 类缺陷，不要同时动多条规则。')
     else:
         print('    ✓ 判据「≥70%」通过')
+    if unknown_n:
+        print(f'  ⚠ 返工轮次「未知」       {unknown_n}/{n} 章'
+              f'（`{UNKNOWN_RETRY}` = 归档时未指定 `--retry`）')
+        print('    → 这 %d 章**不按 0 算、也不按"返工过"算**：它们不进下面的返工轮次统计，'
+              '也不能算"首次合格"。' % unknown_n)
+        print('      补法：重跑 `--archive <章号> --retry N` 覆盖那一行（轮次只能当场记）。')
     if retries:
         sr = sorted(retries)
         print(f'  返工轮次 中位/p90/最大  {sr[len(sr) // 2]} / '
@@ -245,6 +286,8 @@ def report(proj: Path, since: str) -> int:
             pass
     print('\n  ⚠️ 说明：本表是"工单"。**返工轮次由 `--retry` 在执行时落盘**——')
     print('     不能靠事后回想，否则一次合格率就永远是估算。')
+    print(f'     ⚠️ v7.3.0 起**不填 `--retry` 记的是"未知"（`{UNKNOWN_RETRY}`），不是 0**：')
+    print('        "没填"与"真的是 0"是两件事，前者判不了、只能留痕（否则闸门会看不出来）。')
     return 0
 
 
@@ -253,8 +296,10 @@ def main():
     ap.add_argument('project')
     ap.add_argument('--archive', type=int, metavar='章号',
                     help='★ 每章质检时调：跑全套机械脚本 + 归档一行工单')
-    ap.add_argument('--retry', type=int, default=0,
-                    help='本章的返工轮次（retryCount）。**必须当场写**，否则良率不可统计')
+    ap.add_argument('--retry', type=int, default=None,
+                    metavar='N',
+                    help='本章的返工轮次（retryCount）。**必须当场写**，否则良率不可统计；'
+                         f'不填记为"{UNKNOWN_RETRY}"（未知），**不记为 0**')
     ap.add_argument('--report', action='store_true', help='良率 + 缺陷帕累托 + 成本回填')
     ap.add_argument('--since', default='', help='--report 时只统计该日期之后的轨迹')
     ap.add_argument('--quiet', action='store_true', help='只在有缺陷时输出')

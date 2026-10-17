@@ -15,7 +15,8 @@
   python check_repetition.py --all <项目目录>     # 检测全部章节 + 跨章开场/章末同质
   python check_repetition.py --all <项目目录> --window 3 --brief
                                                   # **窗闸**：流水线每章跑一次（滚动窗口）
-退出码: 0 = 干净, 1 = 有重复或跨章同质, 2 = 没扫到章节（fail-closed，不是"通过"）
+退出码: 0 = 干净, 1 = 有重复或跨章同质,
+        2 = 没扫到章节 **或某章读取失败**（fail-closed —— **没检查成功，不是"通过"**）
 """
 
 import argparse
@@ -35,7 +36,7 @@ MIN_DUP_LEN = 15       # 段落归一化后至少 15 字才参与重复判定（
 SIM_THRESHOLD = 0.9    # 近似重复相似度阈值
 
 
-def extract_body(text: str) -> str:
+def extract_body(text: str, keep_blank: bool = False) -> str:
     """提取正文 —— **委托 `_shared.extract_body`**（2026-09-21 收归）。
 
     ⚠ 此前这里是**第五份**独立实现，而且口径明显偏窄：只剥
@@ -45,10 +46,15 @@ def extract_body(text: str) -> str:
     后果：正文文件里只要混了「## 伏笔标记」这类块，就会被当成正文参与重复判定
     → 同一份稿子在重复脚本和节律脚本里分母不同，两边结论打架。
     全 SKILL 只允许有一份 extract_body。
+
+    ★ `keep_blank=True` 是**切段的调用方**（`split_paragraphs`）的必需项：
+      共享版默认压掉空行 → 正文变成**一行** → `re.split(r'\\n\\s*\\n')` 永远 1 段
+      → **章内重复一处也查不出来、每章都打 `[通过]`**（又一个假闸门）。
+      `check_aistyle.py` 第 275 行踩过同一个坑并留了注释，这里是它的孪生。
     """
     sys.path.insert(0, str(Path(__file__).parent))
     from _shared import extract_body as _shared_extract_body
-    return _shared_extract_body(text)
+    return _shared_extract_body(text, keep_blank=keep_blank)
 
 
 def read_text(p) -> str:
@@ -75,14 +81,26 @@ def split_paragraphs(body: str) -> list:
 
 
 def find_duplicates(file_path: Path) -> list:
-    """检测单章重复，返回 [(段A原文, 段B原文, 类型)]"""
+    """检测单章重复。**返回值三态 —— 这是本脚本最容易踩的坑，改动前务必读**：
+
+        `None` = **没读到**（读失败：目录当文件、编码不对、权限不足、文件不存在…）
+        `[]`   = **读到了，但没有重复**（这才是真正的"通过"）
+        非空   = 有重复，元素为 (段A原文, 段B原文, 类型)
+
+    ⚠⚠ **把前两者合并（例如读失败也 `return []`）就是"假闸门"。**
+    调用方将无法区分"检查过了、没问题"与"根本没检查"，
+    于是**读失败会直接走进 `[通过]` 分支** —— 报告全绿，而闸门一次都没生效。
+    这正是 `references/skill-mechanics.md` 反模式表里那条
+    「**跳过伪装成通过**」：比"跳过没留痕"更糟，因为它连痕迹都没有。
+    所以调用方**必须** `if dupes is None` 先判读失败，**绝不能用 `if not dupes`**。
+    """
     try:
         text = file_path.read_text(encoding='utf-8')
     except Exception as e:
         print(f'[错误] 读取失败 {file_path.name}: {e}')
-        return []
+        return None      # ★ 不是 []：读不到 ≠ 没重复
 
-    body = extract_body(text)
+    body = extract_body(text, keep_blank=True)   # ★ 必须 True，否则永远只有 1 段（见上方 docstring）
     paras = split_paragraphs(body)
     dupes = []
     n = len(paras)
@@ -99,7 +117,18 @@ def find_duplicates(file_path: Path) -> list:
 
 
 def check_file(file_path: Path) -> int:
+    """单章检查。返回 **0 = 通过 / 1 = 有重复 / 2 = 读取失败（没检查成功）**。
+
+    ⚠ 三态语义不可混用：**2 不是"重复数"**，调用方（`main` 汇总）
+    必须按值分流，**不能一律累加**（否则报告里会冒出"2 处段落重复"这种假数字）。
+    读失败必须返回**非 0**，并把"读取失败 = 没检查，不等于通过"打在屏幕上——
+    这是"跳过必须留痕"在单章模式下的落点。
+    """
     dupes = find_duplicates(file_path)
+    if dupes is None:
+        print(f'[失败] {file_path.name}：**读取失败 = 没检查，不等于通过**')
+        print('       脚本对这份稿子零结论。先修路径/编码/权限，再重跑。')
+        return 2
     if not dupes:
         print(f'[通过] {file_path.name}：无重复段落')
         return 0
@@ -133,7 +162,51 @@ _ENV_OPEN = ('天色', '天光', '阳光', '月光', '星光', '风雨', '风从
              '雨', '雪', '雾', '云', '空气', '窗外', '远处', '街上', '路上', '院里',
              '村里', '村子', '天空', '天边', '光线', '热气', '寒气', '潮气', '尘',
              '阳光', '影子', '光线', '声音从')
-_QUOTE_OPEN = ('"', '"', '"', '「', '『', "'", "'")
+# 引号开头的字符表 —— 用于判"这一行/这一段是不是**对话**起手"。
+#
+# ★ 口径必须与 `check_human_rhythm.py` 的**叙述剥离正则**（`[“"「『]…[”"」』]`）**同源**。
+#   两边不同 = **同一份稿子两个脚本结论打架**：节律脚本按"对话"把它剥掉、
+#   重复脚本却当成"叙述" → 同一个开场，一个说"对话先行"、一个说"环境空镜"。
+#   `check_aistyle.py` 的注释（ASCII 引号硬闸门那段）已点明这个前提：
+#   "会导致 check_human_rhythm 的「句首引号占比」直接判 0.0%" ——
+#   **对话行认不出来，下游所有基于"对话/叙述"的判定全部失真。**
+#
+# ⚠ 历史 bug（2026-10-10 核实）：本元组原写作
+#   `('"', '"', '"', '「', '『', "'", "'")`
+#   —— 实测码点是 `[0][1][2]=U+0022`（ASCII 直双引号，重复三次）、
+#   `[5][6]=U+0027`（ASCII 直单引号，重复两次），
+#   **7 项里 5 项是重复占位，全角左双引号 `“`(U+201C) 根本不在表里**
+#   （当初写的时候字面量被写成了同一个字符，肉眼看不出来）。
+#   后果：用全角引号写对话的稿子，**对话行全部识别不到**。
+#   → 所以下表**逐字符列出、不重复**，并在注释里标码点便于核对。
+#
+# 收录理由（含行首右引号）：真实稿子里"行首是右引号"是常见的**引号写歪**
+#   （作者把 `”` 打在句首），它**本身就是对话行**，收进来能兜住；
+#   若漏掉，这段会被判成"叙述落笔"，反过来污染开场/章末同质的结论。
+_QUOTE_OPEN = (
+    '"',       # U+0022 半角双引号（正文里出现即已被 check_aistyle 硬拦，这里兜底）
+    '“',  # U+201C 全角左双引号 ★ 原表缺失的那个
+    '”',  # U+201D 全角右双引号（行首右引号 = 引号写歪，仍是对话）
+    '「',      # U+300C 直角左双引号
+    '『',      # U+300E 直角左单引号
+    "'",       # U+0027 半角单引号
+    '‘',  # U+2018 全角左单引号
+)
+
+# 三处使用点，分别判什么（★ 改本表前先逐个确认，别凭"听起来像"）：
+#   ① `classify_opening()` —— **首字符**是不是引号 → 本章是否"对话起手"。
+#   ② `_ending_head()`     —— **末段首字符**是不是引号 → 末段收束起始词记作 `【对话】`
+#                            （`check_endings` ① 级会跳过 `【对话】` 对，不判"同词收尾"）。
+#   ③ `_classify_ending()` —— **末段首字符**是不是引号 → 章末落笔形态记为『对话』
+#                            （影响 ③ 级"连续 ≥5 章全叙述落笔"的计数）。
+#
+# 放宽会不会把"叙述落笔"误判成"对话落笔"？——不会：
+#   · 判据只看**首字符**这一个位置，不涉及句内。
+#   · 中文叙述段落的起手字是汉字/数字/省略号，**不会**是引号；
+#     而 `‘` 在中文里是引号套引号的内层引号、`”` 在行首只可能是引号写歪
+#     —— 两种情形**原文就是对话**，判成对话是纠正而不是误判。
+#   · 代价方向是**假阴性**（少数写歪的对话没被算成"同质"→ 略降灵敏度），
+#     不是**假阳性**（把叙述拦下来）。按 v7.3.0 的判据，只有假阳性才不许放宽。
 
 # 「空镜起手」= 时间或环境开头——本次事故的直接形态
 _EMPTY_SHOT = ('时间', '环境')
@@ -147,7 +220,7 @@ def classify_opening(body: str):
     head = h[:40]
     probe = head[:14]
 
-    if head[:1] in _QUOTE_OPEN:
+    if head[:1] in _QUOTE_OPEN:      # 使用点①：本章是否"对话起手"（只看首字符）
         return '对话', head
     for w in _TIME_OPEN:
         if w in probe:
@@ -238,7 +311,7 @@ _ENDING_OPEN_STOP = set('他 她 我 它 你 这 那 有 是 在 就 都 也 又
 def _ending_head(last_para: str) -> str:
     """取章末段的前 2 字作为「收束起始词」（用于检测相邻章同构）。"""
     h = re.sub(r'^[\s　]+', '', last_para)
-    if h[:1] and h[:1] in _QUOTE_OPEN:
+    if h[:1] and h[:1] in _QUOTE_OPEN:   # 使用点②：末段起手是对话 → 不参与"同词收尾"
         return '【对话】'
     w = h[:2]
     if len(w) < 2 or w[0] in _ENDING_OPEN_STOP or not re.match(r'^[\u4e00-\u9fff]{2}$', w):
@@ -253,7 +326,7 @@ def _classify_ending(body: str):
         return '?', ''
     last = paras[-1]
     head = last[:34]
-    if last[:1] and last[:1] in _QUOTE_OPEN:
+    if last[:1] and last[:1] in _QUOTE_OPEN:   # 使用点③：章末落笔形态 = 对话
         return '对话', head
     if re.search(r'[【\[][^】\]]{2,}[】\]]', last) or \
        re.search(r'(已收到|恭喜|获得|解锁|等级|属性)', last):
@@ -511,32 +584,53 @@ def main():
         # 窗闸：判定只看最近 N 章。早先的章在它进窗口时已经查过；
         # 批末不带 --window 的 --all 会做一次全量兜底。
         win = files[-args.window:] if args.window > 0 else files
-        total_dupes = 0
+        # ⚠ `check_file` 的返回值是**三态**（0 通过 / 1 有重复 / 2 读取失败），
+        #   所以**不能**再写成 `total_dupes += n` 那样一律累加 ——
+        #   那会把「2」当成"2 处重复"混进重复计数（同一份报告两个错：
+        #   数字假的，而且读失败被当成"检查过了"）。必须按值分流。
+        dup_chapters = 0      # 含重复的章数
+        read_fail = 0         # 读取失败的章数 = **没检查**，绝不计入"通过"
         for f in win:
+            fp = Path(f)
             if args.brief:
                 # 静音但保留判定——不能为了省输出把闸门一起省掉
                 with contextlib.redirect_stdout(io.StringIO()):
-                    n = check_file(Path(f))
-                total_dupes += n
-                if n:
-                    print(f'  ✗ {Path(f).name}：{n} 处段落重复')
+                    rc = check_file(fp)
             else:
-                total_dupes += check_file(Path(f))
+                rc = check_file(fp)
+            if rc == 2:
+                read_fail += 1
+                # 静音模式也必须留痕：这条路径 = "没检查成功"，不能悄悄过去
+                if args.brief:
+                    print(f'  ✗ {fp.name}：**读取失败 —— 本章没有被检查，不等于通过**')
+            elif rc == 1:
+                dup_chapters += 1
+                if args.brief:
+                    print(f'  ✗ {fp.name}：有段落重复')
         same_open = check_openings(win, brief=args.brief)
         same_end = check_endings(win, brief=args.brief)
         imag = check_imagery(project, brief=args.brief) if args.imagery else 0
         if args.brief:
-            bad = total_dupes or same_open or same_end or imag
+            bad = dup_chapters or same_open or same_end or imag or read_fail
             tail = (f'\n[低费用·窗闸] 窗口 {len(win)}/{len(files)} 章'
-                    f'｜章内重复 {total_dupes}｜开场同质 {same_open}｜章末同质 {same_end}')
+                    f'｜章内重复 {dup_chapters}｜开场同质 {same_open}｜章末同质 {same_end}')
             if args.imagery:
                 tail += f'｜意象配额 {imag}'
+            if read_fail:
+                tail += f'｜★ 读取失败 {read_fail} 章（没检查，不算通过）'
             print(tail + (' → 合格' if not bad else ' → 不合格'))
         else:
             extra = f'，{imag} 个意象从不缺席' if args.imagery else ''
-            print(f'\n===== 汇总：{len(files)} 章，{total_dupes} 章含重复，'
-                  f'{same_open} 处开场同质，{same_end} 处章末同质{extra} =====')
-        sys.exit(1 if (total_dupes or same_open or same_end or imag) else 0)
+            note = f'，★ {read_fail} 章读取失败（没检查）' if read_fail else ''
+            print(f'\n===== 汇总：{len(files)} 章，{dup_chapters} 章含重复，'
+                  f'{same_open} 处开场同质，{same_end} 处章末同质{extra}{note} =====')
+        # ★ 读失败 = 本章一次都没被检查 → fail-closed，退出码非 0（与"没扫到章节"同类）。
+        #   绝不能只靠 dup_chapters：那会让"一份稿子都没读到"退出 0 = 静默通过。
+        if read_fail:
+            print(f'\n[错误] {read_fail} 章**读取失败** —— 这些章一次都没被检查过。')
+            print('       读取失败 ≠ 通过：先修路径/编码/权限，再重跑本脚本。')
+            sys.exit(2)
+        sys.exit(1 if (dup_chapters or same_open or same_end or imag) else 0)
     else:
         f = Path(args.path)
         if not f.exists():
