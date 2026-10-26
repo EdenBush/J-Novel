@@ -346,6 +346,10 @@ def analyze_chapter(file_path: Path) -> dict:
     ascii_sq = body.count("'")
     # 全角/直角引号（用于对照：若全角也为 0 且 ASCII > 0，说明引号样式整体写错了）
     full_q = body.count('\u201c') + body.count('\u201d') + body.count('\u300c') + body.count('\u300d')
+    # ★ 2026-10-21：直角引号「」单独计数 → **只做排版提示，不做 AI 判据**。
+    #   实测（6 部语料 / 1550 万字，人类 3 部 + AI 3 个样本）：「」全部 0 处。
+    #   所以它**不是 AI 特征**（拿它判 AI = 假判据），但本体系规定中文原创统一用 `“”`。
+    zh_bracket = body.count('\u300c') + body.count('\u300d')
 
     return {
         'file': file_path.name,
@@ -353,6 +357,7 @@ def analyze_chapter(file_path: Path) -> dict:
         'cj_space': cj_space, 'cj_space_density': cj_space_density,
         'ascii_sq': ascii_sq,
         'full_quote_n': full_q,
+        'zh_bracket': zh_bracket,
         'cliche_hits': cliche_hits,
         'cliche_density': round(cliche_density, 3),
         'hard_style': hard_style,
@@ -439,12 +444,19 @@ def print_chapter(r: dict, full: bool = False):
     dq, sq, fq = r.get('ascii_dq', 0), r.get('ascii_sq', 0), r.get('full_quote_n', 0)
     if dq:
         print(f'半角双引号 `"`  {dq} 处  ✗ **不合格（零容忍）**')
-        print('  → 对话一律用中文引号 `“ ”`（或项目统一用 `「」`，但必须全书一致）。')
+        print('  → 对话一律用中文弯引号 `“ ”`。**不用直角引号 `「」`**（本体系排版规范）。')
         print('    根因：写 .md 时天然输出 ASCII 引号，会让"句首引号占比"指标直接判 0.0%。')
         if fq == 0:
             print('    ⚠ 全角引号 0 处 + 半角 %d 处 = **整章引号样式全错**，不是漏改几处' % dq)
     else:
         print(f'引号样式 ✓（全角/直角引号 {fq} 处，半角 0 处）')
+    # ── 直角引号「」：排版提示（**不阻塞**，且明确不是 AI 判据）──
+    zhb = r.get('zh_bracket', 0)
+    if zhb:
+        print(f'直角引号「」 {zhb} 处  △ **请改成弯引号 `“ ”`（排版规范，不是 AI 判据）**')
+        print('  → 本体系规定中文原创统一用 `“ ”`。实测 6 部语料（1550 万字，含 3 个 AI 样本）'
+              '「」出现 0 处 —— 它不是"AI 味"，只是这套语料里不存在的写法；'
+              '统一它图的是**全书排版一致**，别把它当质量指标。')
 
     # ── 汉字↔半角数字夹空格（硬闸门）──
     cjs, cjsd = r.get('cj_space', 0), r.get('cj_space_density', 0.0)

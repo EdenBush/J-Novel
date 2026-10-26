@@ -1657,6 +1657,69 @@ def check_cross_script(root: Path):
     return issues
 
 
+# ── 改写读点同步（2026-10-21 新增）────────────────────────────────────────
+#   治的是"清单漂移"。`SKILL.md` 动作 7 与 `deai-entry.md` 第 3 步
+#   各自列了一份"怎么改"的读点清单；2026-10-21 复查发现**入口少了 4 本**
+#   （`human-rhythm` / `human-exemplars` / `dialogue-writing` / `character-voice`）。
+#   为什么这条必须有守卫：**清单是"怎么改"的唯一载体**——
+#   漏一本 = 那一层技法对执行者在结构上不存在。而入口那张表
+#   **看起来很完整**，执行者不会怀疑它还缺东西，于是**根本不会回动作 7 对照**。
+#
+#   ⚠️ 判据方向：只查「**动作 7 有的，入口必须都有**」，不要求两处完全相等。
+#   入口可以多列（比如顺序说明、phase5 的引用），但**不许少**。
+#   ⚠️ 找不到锚点 → 返回问题，**不返回空**（"判不了"不是"通过"）。
+def check_rewrite_reading_sync(root: Path):
+    """改写读点的两处一致性 —— 主 Agent（动作 7 ↔ 入口）＋ 磨手（chained-pipeline）。
+
+    **为什么要有这一对守卫**：2026-10-21 一天之内，同一个病复发两次 ——
+      ① 动作 7 有 11 本、入口只有 7 本（入口那张表**看起来完整**，所以执行者不会回去对照）；
+      ② 磨手表漏了 `rewrite-playbook`，而**写初稿的笔手反而有**（执行改的人没有招式）。
+    两处的共同机制：**清单写在两个地方，改一处忘了另一处，而漏掉的那处看起来也很正常。**
+    """
+    issues = []
+    sk = read_text(root / 'SKILL.md')
+    de = read_text(root / 'references' / 'guides' / 'deai-entry.md')
+    a7 = [l for l in sk.split('\n') if l.startswith('| 7 |')]
+    if not a7:
+        issues.append('`SKILL.md` 里找不到以 `| 7 |` 开头的动作 7 行（表格格式可能变了）'
+                      '—— 本守卫判不了，不算通过')
+    else:
+        s7 = set(re.findall(r'guides/([a-z0-9\-]+)\.md', a7[0]))
+        try:
+            i3, i4 = de.index('### 第 3 步'), de.index('### 第 4 步')
+            s3 = set(re.findall(r'([a-z0-9\-]+)\.md', de[i3:i4]))
+            missing = sorted(g for g in (s7 - s3) if g != 'deai-entry')
+            if missing:
+                issues.append(f'`deai-entry.md` 第 3 步少了 {len(missing)} 本动作 7 要求的改写读点：'
+                              f'{" / ".join(missing)} —— 走入口的执行者不会打开它们'
+                              f'（改第 3 步的索引表，或改动作 7，两处必须同步）')
+        except ValueError:
+            issues.append('`deai-entry.md` 找不到「### 第 3 步」或「### 第 4 步」锚点'
+                          '—— 本守卫判不了，不算通过')
+
+    # ── 磨手读点（2026-10-21 新增）：执行"改"的角色必须拿得到招式 ──────────
+    #   实测缺口：磨手表只列了 human-exemplars / character-voice / dialogue-writing /
+    #   specificity-gate，**没有 rewrite-playbook** —— 于是磨手只能照速查卡的 5 个动作名
+    #   **凭语感把句子写长**，指标变绿但那不是人类范本里的写法。
+    cp_p = root / 'references' / 'guides' / 'chained-pipeline.md'
+    if cp_p.is_file():
+        cp = read_text(cp_p)
+        try:
+            _i = cp.index('#### 磨手读什么')
+            _j = cp.index('### 主编', _i)
+            blk = cp[_i:_j]
+        except ValueError:
+            issues.append('`chained-pipeline.md` 找不到「#### 磨手读什么」到「### 主编」的区间'
+                          '—— 磨手读点守卫判不了，不算通过')
+            blk = ''
+        for need in ('rewrite-playbook', 'deai-entry'):
+            if blk and need + '.md' not in blk:
+                issues.append(f'`chained-pipeline.md` 磨手表缺 `{need}.md` —— '
+                              f'磨手是执行"改"的角色，读不到招式就只能凭语感写长'
+                              f'（2026-10-21 实测过的缺口）')
+    return issues
+
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description='j-novel 发布前 QA')
@@ -1677,12 +1740,13 @@ def main():
     struct = check_structure(root)
     residue = check_residue(root)
     cross = check_cross_script(root)
+    sync = check_rewrite_reading_sync(root)
 
     regress_problems, rows = ([], [])
     if args.regress:
         regress_problems, rows = check_checks_separation(root)
 
-    blockers = refs + syntax + thr + chain + struct + residue + cross + regress_problems
+    blockers = refs + syntax + thr + chain + struct + residue + cross + sync + regress_problems
 
     if args.json:
         print(json.dumps({
@@ -1711,6 +1775,7 @@ def main():
     print(f'  5. 结构完整性      {len(struct)} 处问题')
     print(f'  6. 残留检查        {len(residue)} 处残留（{len(DEPRECATED)} 个已废弃说法）')
     print(f'  6.5 跨脚本一致性    {len(cross)} 处冲突')
+    print(f'  6.6 改写读点同步    {len(sync)} 处不一致（动作7↔入口 ＋ 磨手表）')
     if args.regress:
         print(f'  7. 分离回归        {len(regress_problems)} 处异常（人类 {len(HUMAN_SAMPLES)} / AI {len(AI_SAMPLES)} 样本）')
         for name, h, a in rows:
@@ -1734,7 +1799,8 @@ def main():
         print(f'✗ 发布前 QA 未通过（{len(blockers)} 项阻塞）：')
         for label, items in [('引用失效', refs), ('语法失败', syntax), ('阈值漂移', thr),
                              ('调用链缺口', chain), ('结构问题', struct),
-                             ('残留', residue), ('跨脚本', cross), ('回归异常', regress_problems)]:
+                             ('残留', residue), ('跨脚本', cross), ('改写读点不同步', sync),
+                             ('回归异常', regress_problems)]:
             for it in items:
                 print(f'  • [{label}] {it}')
         print()

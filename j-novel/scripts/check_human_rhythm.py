@@ -270,31 +270,39 @@ def _pad(s, width: int, align: str = '<') -> str:
 # **本轮诊断的核心发现**：这些"偏低"项不是随机噪声，而是同一个病的三个影子 ——
 # **句子太短、都以代词开头、靠破折号补刀 = "碎句流" = 干净但空洞**。
 # 而空洞的成因是**我们的配额几乎全是"压住"（≤），"补足"（≥）只有三项且都是数数型**。
+# ══════════════════════════════════════════════════════════════════════════
+# ★★ 2026-10-21 重写：从「给动作」改成「只给去向 + 禁令」。
+#
+#   原来的每一条都是"可以直接照着做的动作"（"插入铺陈句""补 1–2 处直说"），
+#   执行者读完就**足以下手**，于是不再去查那一节 ——
+#   而真正决定"像不像人"的是那一节里的**配方与真人范式**。
+#   结果是：指标变绿，但那是"它自己的写法"，不是范本里的写法。
+#   → 现在每条只回答**查哪里**，并给出**这一项最常见的作弊式改法**（禁令）。
+#     配方留在指南里，必须打开那一节才拿得到。
+# ══════════════════════════════════════════════════════════════════════════
+# 对话结构快照的键名（**不参与 17 项判定**，只供报告定位用；json 输出时会被剥掉）
+DIALOG_KEY = 'dialog_stats'
+
 _FIX_HINT = {
-    'sent_mean':   '**在短句之间插入铺陈句**（不是把短句改长）——一个动作之后，补一句它周围的环境或身体的感受，让它自己长起来。见 `rewrite-playbook.md` **第 3 节**（补足顺序 A-1，最高杠杆的一步）',
-    'quote_head':  '让更多句子**从对话开始**：把「他说：\"……\"」改成直接以引号起句；或把纯叙述句改成"说话 + 补充动作"',
-    'emotion':     '补 1–2 处**直说或动作**——这一项是**区间**不是下限，被"禁情绪词"禁过头了。见 `human-rhythm.md` 规则 6（三种写法混用）',
-    'body':        '补身体反应（手／脚／胸口／后颈），但**别全用身体写情绪**——那是另一种单一化',
-    'simile':      '补 1–2 个比喻，其中 **≥1 个非明喻**。见 `human-quota.md`',
-    'digit_density': '**补具体数字**——"三年前""两指宽""七步""一百九十三文"。数字是把叙述锚进现实的绳（人类 1.16–3.15/千字）。见 `rewrite-playbook.md` 第 9 节',
-    'real_measure': '**补现实锚定**——真实世界的数目／日期／门牌／价格（"998 的套餐""9 月 1 号""602 宿舍""月薪六千"）。人类技法第 15 项，实测 **19 倍分离**（注：基线取自现实题材，架空/奇幻题材天然偏低，判读放宽）。见 `rewrite-playbook.md` 第 9 节',
-    # ⚠️ `act_density` **故意没有补法**：它数的是 `ACTION_PATTERNS`（违禁品清单）的密度，
-    #    **低 = 好事**。给它写"补动作描写"会把 Agent 推向 AI 万能动作标签（2026-10-07 修）。
-    #    它的区间豁免见 THRESHOLDS 里的 `no_range=True`。
-    'long_sent_pct': '补 **1 句 ≥60 字的长句**——用逗号铺陈，**不要用破折号**。见 `rewrite-playbook.md` 第 3 节',
-    'sent_p90':    '同上：补长句把 p90 抬起来（p90 低 = 全篇没有"敢写长"的地方）',
-    'long_dialog': '**让某个角色把一段话说完**（≥30 字完整发言）——人类 15.8–27.7%。它是"人在说话"而不是"信息交换"的标志',
-    'cn_measure':  '补中文量词（一截／一根／两把／三片）',
-    'rhythm_cv':   '节奏太平——**拉开长短句对比**，别让全篇句长都在一个带上',
-    # ★ v7.4.0「闸门可信度」文案修正：原文案写的是"作者跳出来**解释**／吐槽／埋梗／给数值"，
-    #   把"跳出来解释"当成了"作者在场"的正当补法 —— 而**解释腔**（替读者解释因果）
-    #   正是本项目别处要求砍掉的东西（`ai-cliche-blacklist.md` C 级）。
-    #   两处要求打架 → Agent 先照这条补解释、再照那条砍解释，白做工。
-    #   → 补法只保留**叙述者有自己的声音**那一类（吐槽／埋梗／对读者直接说话／给数值）。
-    'author_presence': '补**叙述者插话**（吐槽／埋梗／**对读者直接说话**／给数值）——⚠️ **不是"解释人物动机"**'
-                       '（那是解释腔，要砍，见 `ai-cliche-blacklist.md` C 级）。见 `human-rhythm.md` 规则 7',
-    'dialog':      '补对话——**<10% 是结构性缺失**（整个对话维度塌了、退化成旁白）',
-    'pron_head':   '（偏高项）把句子主语从代词换成物/景/动作——"光从窄窗进来"而不是"他看到光进来"',
+    'sent_mean':   '查 `rewrite-playbook.md` **§3**（长句合并配方：[谁+状态]→[动作]→[手段]→[即时结果]→[机制]→[推论]，附 162 字真人范式 + 反例）。⚠️ **禁令**：不许把连续短句"用逗号连起来"充数——那是指标作弊，不是写法',
+    'quote_head':  '查 `rewrite-playbook.md` **§2** + `human-rhythm.md` **规则 2**（句首引号的三种起句法）。⚠️ **禁令**：不许改成"他说：……"充数，那只是换了句式外壳',
+    'emotion':     '查 `rewrite-playbook.md` **§6** + `human-rhythm.md` **规则 6**（情绪三种写法配比）。⚠️ 这一项是**区间**不是下限——被"禁情绪词"禁过头了',
+    'body':        '查 `rewrite-playbook.md` **§5** + `human-rhythm.md` **规则 5**。⚠️ **禁令**：别全用身体写情绪，那是另一种单一化',
+    'simile':      '查 `rewrite-playbook.md` **§7** + `human-quota.md`（比喻配额）',
+    'digit_density': '查 `rewrite-playbook.md` **§9**（数字密度，人类 1.16–3.15/千字）',
+    'real_measure': '查 `human-exemplars.md` **七**（现实锚定）+ `specificity-gate.md` **二**。⚠️ 基线取自现实题材——**架空/奇幻天然偏低，这一项判读要放宽**',
+    'long_sent_pct': '查 `rewrite-playbook.md` **§3 附**（≥100 字长句配方）。⚠️ 用逗号铺陈，**不要用破折号**',
+    'sent_p90':    '同 `long_sent_pct`（p90 低 = 全篇没有"敢写长"的地方）',
+    'long_dialog': '查 `dialogue-writing.md` **三之三**（完整发言 15.8–27.7%）。⚠️ **禁令**：不是"把几句短发言拼成一句"',
+    'cn_measure':  '查 `post-polish.md` **工序 2**（定指替换／量词）',
+    'rhythm_cv':   '查 `post-polish.md` **工序 4**（节奏起伏）。⚠️ **禁令**：不许靠"随机删句/拆句"制造起伏',
+    'author_presence': '查 `human-rhythm.md` **规则 7**（叙述者插话）。⚠️ **不是"解释人物动机"**——那是解释腔，要砍（`ai-cliche-blacklist.md` C 级）',
+    'dialog':      '查 `dialogue-writing.md` **三之三**。⚠️ <10% 是**结构性缺失**（整个对话维度塌了、退化成旁白）',
+    'dash':       '查 `rewrite-playbook.md` **§4** + `human-rhythm.md` **规则 4**。⚠️ 破折号**趋向清零**（人类 0.03–0.29/千字）——用逗号或句号，补充信息并入主句',
+    'pron_head':   '查 `rewrite-playbook.md` **§1**（主语换成物/景/动作）。⚠️ **禁令**：不许把"他"换成"这个人"这类同义词替换',
+    # ⚠️ `act_density` 故意没有补法：它数的是 ACTION_PATTERNS 的密度，**低 = 好事**。
+    #    给它写"补动作描写"会把 Agent 推向 AI 万能动作标签（2026-10-07 修）。
+    #    区间豁免见 THRESHOLDS 的 no_range=True。
 }
 
 
@@ -443,6 +451,46 @@ def analyze(text: str) -> dict:
     #    本质：AI 对话全是"短促的信息交换"，缺少"一段完整发言"（讲道理/诉苦/回忆/辩解）。
     long_dialog = sum(1 for q in quotes if len(q) >= 30) / len(quotes) * 100 if quotes else 0
 
+    # ★★ 对话结构快照（2026-10-24）——治"执行者自己造口径"。
+    #   病历：真实项目里 Agent 为了量"完整发言"，先按**句号**切台词，得出"只有 2%"，
+    #   又自己推翻、改按引号段重算——**光是对齐口径就烧了十几轮调用**，还一度得出错误结论。
+    #   而本脚本的 `long_dialog` 一直是**按引号段**算的（与人类基线同口径）。
+    #   所以这里把口径**明明白白打出来**：单位是引号段，不是句子。
+    #   ⚠️ 这些数**不进 17 项判定**（沿用 `long_dialog` 作判据），只用来定位"哪一段该泡开"。
+    _dlg = {'n': 0, 'median': 0, 'short6': 0.0, 'short15': 0.0, 'full30': 0.0,
+            'run': 0, 'run_at': 0, 'run_head': ''}
+    if quotes:
+        _lens = [len(q) for q in quotes]
+        _sorted = sorted(_lens)
+        _dlg['n'] = len(_lens)
+        _dlg['median'] = _sorted[len(_sorted) // 2]
+        _dlg['short6'] = round(100.0 * sum(1 for x in _lens if x <= 6) / len(_lens), 1)
+        _dlg['short15'] = round(100.0 * sum(1 for x in _lens if x <= 15) / len(_lens), 1)
+        _dlg['full30'] = round(100.0 * sum(1 for x in _lens if x >= 30) / len(_lens), 1)
+        # 「电报段」= 连续短台词、**中间几乎没有叙述**。
+        #   ⚠️ 只看台词长度会把"短句+长段动作描写"也算成电报段 —— 那是活的。
+        #   所以用台词之间的**间隙字数**做闸：间隙 > 12 字 = 有叙述撑着，断链。
+        _spans = [(m.start(), m.end())
+                  for m in re.finditer(r'[“"「『]([^”"」』]{2,})[”"」』]', flat)]
+        _best, _cur, _start, _at, _prev_end = 0, 0, 0, 0, None
+        for _i, _x in enumerate(_lens):
+            _gap = (_spans[_i][0] - _prev_end) if (_prev_end is not None and _i < len(_spans)) else 0
+            _prev_end = _spans[_i][1] if _i < len(_spans) else _prev_end
+            if _x <= 15 and _gap <= 12:
+                if _cur == 0:
+                    _start = _i
+                _cur += 1
+                if _cur > _best:
+                    _best, _at = _cur, _start
+            else:
+                _cur = 1 if _x <= 15 else 0
+                if _cur:
+                    _start = _i
+        _dlg['run'] = _best
+        _dlg['run_at'] = _at
+        _dlg['run_head'] = quotes[_at][:18] if quotes else ''
+
+
     return dict(
         chars=n, sent_n=len(sentences), para_n=len(paras),
         pron_head=round(pron_head, 1), quote_head=round(quote_head, 1),
@@ -457,6 +505,7 @@ def analyze(text: str) -> dict:
         long_sent_pct=round(long_sent_pct, 2), sent_p90=sent_p90, sent_max=sent_max,
         rhythm_cv=round(rhythm_cv, 3), cn_measure=round(cn_measure, 2),
         long_dialog=round(long_dialog, 1),
+        **{DIALOG_KEY: _dlg},
         author_presence=author_presence, narr_q=narr_q, narr_ex=narr_ex,
         explain_d=explain_d,
     )
@@ -626,8 +675,47 @@ def project_summary(files):
 
 def report(name, r, as_json=False):
     if as_json:
-        return dict(file=name, metrics=r, verdict={k: grade(k, r[k])[0] for k in THRESHOLDS})
+        _m = {k: v for k, v in r.items() if k != DIALOG_KEY}
+        return dict(file=name, metrics=_m, verdict={k: grade(k, r[k])[0] for k in THRESHOLDS},
+                    dialog=r.get(DIALOG_KEY) or {})
     print(f'\n===== {name} =====')
+
+    # ══════════════════════════════════════════════════════════════════
+    # ★★ 结论前置（2026-10-21）—— 治"读完清单就动手、不读入口"
+    #   此前分诊段打在**报告最后一行**，而它前面是「★ 补足清单（照它改）」
+    #   加 4 条自带动作的 hint。执行者读到那里，手上已经有一份能直接照做的指令，
+    #   于是**不会再往下读到分诊**，更不会去读 15k token 的工序手册。
+    #   修法：把"档位 + 第一个动作"顶到报告最前面，让它带着框架去读后面的细节。
+    # ══════════════════════════════════════════════════════════════════
+    _pf = sum(1 for _k in THRESHOLDS if grade(_k, r[_k])[0] == 'FAIL')
+    _pw = sum(1 for _k in THRESHOLDS if grade(_k, r[_k])[0] == 'WARN')
+    # ★ 口径必须与函数末尾的累加**完全一致**：命中率 <20% 也计一项 fails、20–35% 计一项 warns。
+    #   否则报告头说 14 项、末尾说 15 项 —— 同一份报告两个数字打架，
+    #   而工单的分诊档取的是末尾那个（make_workorder 抓 `✗ N 项未达标`）。
+    _ph, _pm, _, _ = _hit_stats(r)
+    _ph_tot = len(_ph) + len(_pm)
+    if _ph_tot:
+        _ph_pct = 100 * len(_ph) / _ph_tot
+        if _ph_pct < 20.0:
+            _pf += 1
+        elif _ph_pct < 35.0:
+            _pw += 1
+    if _pf >= 3:
+        _pt, _pwhy = 'R2 深度', f'硬门失败 {_pf} 项（≥3）'
+    elif _pf >= 1:
+        _pt, _pwhy = 'R1 常规', f'硬门失败 {_pf} 项（1–2）'
+    else:
+        _pt, _pwhy = 'R1 常规', '硬门全过，但初稿仍须走改写工序'
+    print('  ┌── ★★ 先看这里：结论与第一个动作 ──────────────────────────')
+    print(f'  │ 硬门失败 {_pf} 项 ／ 软超标 {_pw} 项　→　分诊初判【{_pt}】（{_pwhy}）')
+    print('  │ ★ 改写是**常态工序**，不是投诉响应 —— 每章都要进 `guides/deai-entry.md`，')
+    print('  │   差别只在档位（R1 折扣档 / R2 深度 / R3 分布），**没有"这章不用进"**。')
+    print('  │ ★ **第一个动作不是照下面改，是读入口**：')
+    print('  │   ① `deai-entry.md` 第 0.4 节定档（再叠加命中率与返工轮次）→ 按第二节对应步走')
+    print('  │   ② 档位由 `make_workorder.py --archive` 写进工单「分诊档」列（**不手填**）')
+    print('  │   ③ 下面的「补足清单」只是**索引**（告诉你查哪一节），**不是配方** ——')
+    print('  │      配方在那一节里。照着清单上那几个字即兴写 = 动作 7 未做。')
+    print('  └────────────────────────────────────────────────────────────')
     print(_pad('指标', 22) + _pad('实测', 10, '>') + _pad('人类范围', 15, '>')
           + _pad('目标', 13, '>') + '  判定')
     print('-' * 72)
@@ -708,25 +796,81 @@ def report(name, r, as_json=False):
                 print(f'      · {_d} = {_v}（{_dir2}人类 {_lo2}–{_hi2}）')
             if len(_miss) > 6:
                 print(f'      …另有 {len(_miss) - 6} 项')
-            if len(_low) > len(_high):
-                print('  → 多数偏低 = **欠写**：句子太短／动作与身体细节缺失／完整发言不足。'
+            # ★★★ 2026-10-21 第三处修正：判据从「哪边多」改成「有没有」
+            #   原来是 `if len(_low)>len(_high): … elif len(_high)>len(_low): …`
+            #   → **7:7 时两个条件都不成立，两份清单都不打印**，报告只剩"14 项未命中"和一堆数字。
+            #   而偏低偏高都要治（顺序是先补足后压住），凭什么只给一边？
+            # ── 对话体检（2026-10-24）──
+            #   为什么要单列：用户在真实项目里的原话是"人物对话有点生硬"，
+            #   而 17 项里唯一对应的是 `long_dialog`（一个百分比）——**它告诉你有病，不告诉你病在哪**。
+            #   于是执行者只能自己造句："台词中位 6 字""连续电报段"……口径还自己造错了。
+            #   这一段把口径、数字、以及**最长那串短交换的位置**直接给出来。
+            _ds = r.get(DIALOG_KEY) or {}
+            if _ds.get('n', 0) >= 20:
+                print('  ★ **对话体检**（单位＝**引号段**，不是句子；一段话里多个句号仍算 1 条）：')
+                print('     台词 %d 条｜中位 %d 字｜≤6字 %.1f%%｜≤15字 %.1f%%｜≥30字 %.1f%%'
+                      '（人类 ≥30字 为 15.8–27.7%%）'
+                      % (_ds['n'], _ds['median'], _ds['short6'], _ds['short15'], _ds['full30']))
+                if _ds.get('run', 0) >= 5:
+                    print('     最长短交换段：连续 **%d 轮** ≤15 字（从第 %d 条台词起：「%s…」）'
+                          % (_ds['run'], _ds['run_at'] + 1, _ds['run_head']))
+                if _ds['full30'] < 8.0:
+                    print('     → 「生硬」的准确名字是"**每句都有用，但没有一句是活人在说话**"：')
+                    print('       查 `dialogue-writing.md` **三之三** ＋ `character-voice.md` **四**（声口七问）。')
+                    print('       ⚠️ **禁令**：不要靠"给短句加长"凑百分比——那是更长的功能句，不是完整发言。')
+                    print('       正解是**写前定 2–3 处完整发言点**（`phase3` 动作 3「对话预置」：诉苦／回忆／辩解）。')
+
+            if _low:
+                print('  → 有偏低项 = **欠写**：句子太短／动作与身体细节缺失／完整发言不足。'
                       '别只盯着"没超标"，要看"该有的有没有"。')
                 # ★ 从"读数"变成"行动"（2026-10-07）：只报数字不给动作的报告，
                 #   等于什么都没说——这是本轮诊断里"报告念了、没人改"的直接修法。
-                print('  ★ **补足清单（照它改，不要照"超标项"改）**：')
+                print('  ★ **补足清单 —— 这是索引，不是配方**（每一项都写明去查哪一节）：')
+                print('     → **先查那一节、再动手。** 只照这一行的字面意思即兴写，')
+                print('       就是"用旧语感换层皮"，`deai-entry` 5.1 的「招式依据」会写不出来。')
                 # 按**偏差幅度**排序：先改偏得最狠的那项，别按指标表顺序。
                 _low.sort(key=lambda x: (x[3] - x[2]) / max(x[3], 1e-9), reverse=True)
-                for _k3, _d3, _v3, _lo3, _hi3 in _low[:5]:
+                # ★★ 2026-10-24：不再只打前 5 项。
+                #   病历：一章常有 8–14 项偏低，`_low[:5]` 会把**排在后面的硬门失败**
+                #   挤掉 —— 它们既不出现、也就没有索引，执行者根本不知道要查哪一节。
+                #   现在的规则：**FAIL 级一律打印**（它们是硬门），WARN 级补到 5 项为止。
+                _shown, _skipped = 0, 0
+                for _k3, _d3, _v3, _lo3, _hi3 in _low:
+                    _g3 = grade(_k3, _v3)[0]
+                    if _g3 != 'FAIL' and _shown >= 5:
+                        _skipped += 1
+                        continue
                     _hint = _FIX_HINT.get(_k3)
                     if _hint:
                         print(f'      · {_d3} = {_v3}（人类 {_lo3}–{_hi3}）')
                         print(f'        → {_hint}')
+                        _shown += 1
+                if _skipped:
+                    print(f'      …另有 {_skipped} 项软超标未列（先改上面的硬门失败）')
                 print('  ⚠ **顺序要紧：先补足，再压住。** 反过来做（先删超标项）会把文章越改越干——'
                       '补足会自然把句长／引号／情绪配比带回来，而压住不会。')
-            elif len(_high) > len(_low):
-                print('  → 多数偏高 = **配额拉满**：等于把目标值当起了上限，读起来用力过猛。')
+            if _high:
+                print('  → 有偏高项 = **配额拉满**：等于把目标值当起了上限，读起来用力过猛。')
                 print('  ★ 修正方向：把"上限"当护栏而不是目标——**低于上限不等于不合格**。'
                       '见 `execution-contract.md` 的 `indicator-waived`。')
+                # ★★ 2026-10-21：补上对称的「压住清单」—— 治的正是"压得顺手但没读指南"
+                #   此前偏高侧**只有上面两句话，零索引**。而偏高项恰恰是 Agent 最常做的
+                #   那四个动作（压代词 / 压破折号 / 压体词 / 压明喻）：
+                #     · 补足侧有「补足清单」指向 §3/§6/§9，压住侧什么都没有；
+                #     · 于是它只能照速查卡的"压住 4 步"**动作名**机械地压 ——
+                #       指标能压下来，但那是它自己的写法（作者实测到的行为）。
+                #   补法与补足侧完全对称：**只给索引，不给配方**。
+                if _high:
+                    print('  ★ **压住清单 —— 同样是指引，不是配方**（报哪项就查那一节）：')
+                    print('     → **先查那一节、再压。** 只照动作名（"压代词"）即兴删改，')
+                    print('       就是把 AI 味换成另一种单一化，`招式依据`照样写不出来。')
+                    for _k4, _d4, _v4, _lo4, _hi4 in _high[:5]:
+                        _h4 = _FIX_HINT.get(_k4)
+                        if _h4:
+                            print(f'      · {_d4} = {_v4}（人类 {_lo4}–{_hi4}）')
+                            print(f'        → {_h4}')
+                    print('  ⚠️ **压住 ≠ 删到 0**：上限是护栏不是目标。压过头会把文章改干'
+                          '（"干净但空洞、每句都在干活"是另一种 AI 味）。')
 
     # ══════════ author_presence 的子项地板（2026-09-19 新增）══════════
     # **为什么加**：`author_presence` 是复合分（评价词×1 + 口语×3 + 吐槽×3 + 语气词×1
@@ -779,7 +923,49 @@ def report(name, r, as_json=False):
         print(f"  △ {warns} 项超软阈值 —— 建议修，不阻塞")
     else:
         print("  ✓ 全部达标")
+
+    # ★ 分诊结论已前置到报告开头（见上方 "先看这里"），此处不再重复打印。
     return fails, warns
+
+
+# =========================================================================
+# 指标快照落盘（2026-10-24）—— 为「指标回归」闸门提供两个可比的时间点
+#
+#   病历（真实）：Agent 清 ch1 的明喻，顺手把平均句长从 18.1 压到 17.9
+#   **跌破硬线** —— 它改的是 A 项，破坏的是 B 项，而报告只显示"B 项不达标"，
+#   看不出这是**自己改坏的**。于是它继续在 B 上做最小改动，再撞坏 C……
+#   这就是"打地鼠"的机制：**没有基线，就没有"回归"这个概念**。
+#
+#   动作 6（初稿质检）存「基线」，动作 7 复跑存「最新」，闸门比两份 JSON：
+#   初稿达标 → 现在跌破 = 回归（改坏的，不是初稿的缺陷）。
+# =========================================================================
+def dump_metrics(dest, f, r, kind: str) -> None:
+    """把本次全套指标与判定落成 JSON（`kind` = 基线 / 最新）。"""
+    dp = Path(dest)
+    if dp.is_dir():
+        dp = dp / (f.stem + '-指标' + kind + '.json')
+    dp.parent.mkdir(parents=True, exist_ok=True)
+    items, fails, warns = {}, 0, 0
+    for k, meta in THRESHOLDS.items():
+        g = grade(k, r[k])[0]
+        items[k] = {'v': r[k], 'grade': g, 'desc': meta.get('desc', k)}
+        if g == 'FAIL':
+            fails += 1
+        elif g == 'WARN':
+            warns += 1
+    h, m, _, _ = _hit_stats(r)
+    tot = len(h) + len(m)
+    hit = round(100.0 * len(h) / tot, 2) if tot else None
+    if hit is not None:                      # 与 report() 头部的口径**完全一致**
+        if hit < 20.0:
+            fails += 1
+        elif hit < 35.0:
+            warns += 1
+    payload = {'chapter_file': f.name, 'kind': kind, 'hit_pct': hit,
+               'fails': fails, 'warns': warns, 'items': items}
+    dp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f'  ★ 指标已落盘（{kind}）：{dp}　—　FAIL {fails} 项'
+          + (f'／命中率 {hit}%' if hit is not None else ''))
 
 
 def main():
@@ -787,6 +973,13 @@ def main():
     ap.add_argument('path', help='章节文件 / 或 --all 时的项目目录 / 或 --baseline 时的人类样本')
     ap.add_argument('--all', action='store_true', help='目录下所有 第*.md')
     ap.add_argument('--json', action='store_true', help='机器可读输出')
+    ap.add_argument('--save-baseline', default=None, metavar='PATH',
+                    help='★ 动作 6 用：把初稿指标落成 JSON（目录或文件）。'
+                         '给目录时命名 `<章名>-指标基线.json` —— 它是回归闸门的基准')
+    ap.add_argument('--save-latest', default=None, metavar='PATH',
+                    help='★ 动作 7 复跑用：落成 `<章名>-指标最新.json`。'
+                         '与基线一比 → 「初稿达标、现在跌破」= 改写改坏的')
+
     ap.add_argument('--baseline', action='store_true', help='把该文件当作人类样本，打印其基线值')
     ap.add_argument('--project', action='store_true',
                     help='★ 项目级人味体检：汇总全部章节（命中率曲线 + 系统性偏低/偏高 + 结论），'
@@ -823,6 +1016,10 @@ def main():
             print(f'[跳过] {f.name} 内容过短')
             continue
         out = report(f.name, r, args.json)
+        if args.save_baseline:
+            dump_metrics(args.save_baseline, f, r, '基线')
+        if args.save_latest:
+            dump_metrics(args.save_latest, f, r, '最新')
         if args.json:
             results.append(out)
         else:

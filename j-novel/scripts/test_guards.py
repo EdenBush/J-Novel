@@ -2034,7 +2034,7 @@ def main():
 
     print('99. ★ **口吻宪法缺失 → 任务包 `voice_charter` 变【待填】、`--check` 拒绝开工**')
     print('   （v7.6.0 的**交付点**：圣经有 `## 〇、口吻宪法` → 脚本抽进包；没有 → TODO。')
-    print('     control 同时钉住另外两件事：槽位总数 **18/18**、且它**排在 `batch_global` 之前**'
+    print('     control 同时钉住另外两件事：槽位总数 **19/19**、且它**排在 `batch_global` 之前**'
           '（位置是有意的：声音管每一句，其他正向素材只管这一章/这一批）。）')
     _p99a = _mk_voice_proj(_tmp / '_guard_voicecharter_ok')
     _ra99, _oa99 = _run_pkg(str(_p99a), '--chapter', '1', '--write')
@@ -2065,16 +2065,16 @@ def main():
           f'排在 batch_global 之前={_order99}｜'
           f'注入为待填={"【待填" in _body99b}')
     _ok99 = (_rc99 == 0
-             and '槽位 18/18' in _oc99
+             and '槽位 19/19' in _oc99
              and '声音样本' in _body99
              and '【待填' not in _body99
              and '旧项目补一段口吻宪法即可' in _body99b
              and _rc99b == 1
              and '槽位 `voice_charter` 还是待填状态' in _oc99b
-             and '槽位 18/18' in _oc99b
+             and '槽位 19/19' in _oc99b
              and _order99)
     print(f'  {"✓" if _ok99 else "✗"} 口吻宪法交付点  →  '
-          f'{"抓到（有→18/18 放行且在 batch_global 前；无→待填+拒绝开工）" if _ok99 else "**没抓到！**"}')
+          f'{"抓到（有→19/19 放行且在 batch_global 前；无→待填+拒绝开工）" if _ok99 else "**没抓到！**"}')
     if not _ok99:
         print('       control 输出：', _oc99[-300:].replace('\n', ' / ')[:260])
         print('       注入 输出：', _oc99b[-300:].replace('\n', ' / ')[:260])

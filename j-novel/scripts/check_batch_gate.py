@@ -110,6 +110,12 @@ PLAN_HEAD_ACCEPTED = (PLAN_HEAD_CELLS, PLAN_HEAD_CELLS_V2)
 PLAN_FIELD_BEFORE = re.compile(r'改前\s*[:：](.*)')
 PLAN_FIELD_AFTER = re.compile(r'改后\s*[:：](.*)')
 PLAN_FIELD_WHY = re.compile(r'为什么更好\s*[:：](.*)')
+# ★ 2026-10-21：第四行「依据」（改写招的出处）→ 治"读了指南却没用上"。
+#   `rewrite-units.md` 4.1 由三行改为四行；本校验**只做软提示**，理由见调用处。
+PLAN_FIELD_BASIS = re.compile(r'招式依据\s*[:：](.*)')
+GUIDE_DIR = Path(__file__).resolve().parent.parent / 'references' / 'guides'
+# 「依据」合格形态的粗略判据：必须能指到**文件名 / 节号 / 规则号 / 工序号 / 招名**
+PLAN_BASIS_OK = re.compile(r'\.md|§|第\s*\d+\s*节|规则\s*\d+|工序\s*\d+|U[1-6]|招')
 # 六个改写单元是**接口契约**（跨 agent 共享，一个字都不许改）。
 REWRITE_UNITS = ('U1', 'U2', 'U3', 'U4', 'U5', 'U6')
 _UNIT_TOKEN_RX = re.compile(r'U[A-Za-z0-9]+')
@@ -493,6 +499,73 @@ def check_plan_precision(text: str, header_cells: list) -> tuple:
     return hard, soft
 
 
+# =========================================================================
+# 引文锚点：验「真的翻过那一页」（2026-10-24）
+#
+#   病历（真实，作者抓到的）：Agent 的方案表里 `招式依据` 写了 4 本它**从没打开过**的
+#   指南（human-rhythm / rewrite-units / human-exemplars / specificity-gate）。
+#   为什么能过闸：旧校验只认**格式**（有没有 `.md`／`§`／`规则 N`）——
+#   而格式是**最容易被模仿的东西**。于是闸门从"防没读"退化成"防不会写字"。
+#
+#   ★ 这是 Goodhart 定律的标准形态：**指标一旦成为目标，就不再是好指标。**
+#     我上一轮加「招式依据」，Agent 就把"招式依据"这个**字符串**写对了，
+#     目标（去查那一节）没达成。**任何由执行者自己申报的合规证据，都必须能被机器
+#     对照原文证伪**，否则它只是让人更放心的噪音。
+#
+#   所以：第四行必须附**逐字原文**。原文是只有翻开那一页才拿得到的东西 ——
+#   写不出来就是没翻；编一段假的，在文件里搜不到，当场被证伪（零假阳性：
+#   真抄的一定搜得到）。
+# =========================================================================
+CITE_FILE_RX = re.compile(r'([a-z0-9][a-z0-9\-]*)\.md')
+CITE_QUOTE_RX = re.compile(r'原文\s*[:：]\s*(.+)$')
+_NORM_DROP_SET = set(map(chr, (0x300C, 0x300D, 0x300E, 0x300F, 0x201C, 0x201D,
+                               0x2018, 0x2019, 0x27, 0x22, 0x20, 0x09, 0x0A,
+                               0x0D, 0x2A, 0x5F, 0x60, 0x3E, 0x7C, 0xFF5C)))
+
+
+def _norm_cite(s) -> str:
+    """去掉强调符／引号／空白后比对 —— 执行者抄原文时常带 `**` 或换引号，那不是伪造。"""
+    return ''.join(ch for ch in (s or '') if ch not in _NORM_DROP_SET)
+
+
+def _guide_norm(name: str) -> str:
+    p = GUIDE_DIR / (name + '.md')
+    return _norm_cite(read_text(p)) if p.is_file() else ''
+
+
+def verify_basis_citations(text: str):
+    """核验每条「招式依据」的原文锚点 → (硬问题, 软提示)。
+
+    ⚠️ 硬问题的判据极窄：**只在"引文在该文件里逐字搜不到"时报**。
+       真正的引用一定搜得到，所以这个判据没有假阳性 —— 这是本项目允许写硬判据的前提。
+    """
+    hard, soft = [], []
+    for m in PLAN_FIELD_BASIS.finditer(text):
+        b = (m.group(1) or '').strip()
+        names = [n for n in CITE_FILE_RX.findall(b) if (GUIDE_DIR / (n + '.md')).is_file()]
+        if not names:
+            continue                      # 没写文件名 → 归格式校验管
+        qm = CITE_QUOTE_RX.search(b)
+        if not qm:
+            soft.append('「招式依据」缺**原文锚点** —— 写成 '
+                        '`招式依据：rewrite-playbook.md §3 合并配方｜原文：<逐字抄一句>`。'
+                        '没有原文，机器验不了你翻没翻过；只写节号 = 可以凭索引描述编出来')
+            continue
+        frags = [_norm_cite(x) for x in re.split(r'…|\.\.\.|⋯', qm.group(1))]
+        frags = [f for f in frags if len(f) >= 6]
+        if not frags:
+            soft.append('「招式依据」的原文锚点不足 6 字，核验不了 —— 请整句抄')
+            continue
+        corpus = [(n, _guide_norm(n)) for n in names]
+        bad = [f for f in frags if not any(f in t for _, t in corpus)]
+        if bad:
+            hard.append('「招式依据」引了《%s》的原文，但那段话在该文件里**搜不到**：「%s」'
+                        ' → 两种可能：① 没读，照索引描述编的；② 记错原文。'
+                        '两种都不接受 —— **引文必须逐字复制**。'
+                        % ('/'.join(names), bad[0][:26]))
+    return hard, soft
+
+
 def check_rewrite_plan(text: str) -> tuple:
     """校验一份改写方案表 → `(硬问题列表, 软提示列表)`（硬列表空 = 合规）。
 
@@ -540,6 +613,33 @@ def check_rewrite_plan(text: str) -> tuple:
     # ★ v7.5.0：内容精度（硬问题并入 issues；软提示另返回）
     _hard, _soft = check_plan_precision(text, _hc)
     issues.extend(_hard)
+
+    # ★ 2026-10-21：第四行「依据」——**只做软提示，不进硬问题**。
+    #   为什么不做硬闸门：存量方案表是在"还没有这一行"的时候写的，
+    #   一旦硬拦就是**把合法流程卡住**（假阳性）。而本项目对假阳性的判据是
+    #   "绝对不能有"（见 parse_reworked_chapters 的说明）：有假阳性的闸门 = 造假闸门。
+    #   → 先软提示跑一个版本周期，等存量补齐再考虑硬化。
+    #   ⚠️ 同时它是**"读点有没有被执行"的唯一机器可得信号**：
+    #     写了具体节号 → 说明它真去翻了那一节；写"依据改写规则" → 说明没有。
+    if not PLAN_FIELD_BASIS.search(text):
+        _soft.append(
+            '缺第四行「招式依据：」（2026-10-21 新增；存量方案表不阻塞）—— '
+            '这一行证明"改写时手里有招"，不是凭语感把句子写长了。'
+            '格式：`招式依据：rewrite-playbook.md §3 合并配方`')
+    else:
+        _bases = [m.group(1).strip() for m in PLAN_FIELD_BASIS.finditer(text)]
+        _empty = [b for b in _bases if not PLAN_BASIS_OK.search(b or '')]
+        if _empty:
+            _soft.append(
+                f'{len(_empty)} 条「招式依据」写成了空话（不含文件名／节号／招名）—— '
+                f'例：「{( _empty[0] or "（空）")[:36]}」；'
+                f'应写成 `招式依据：rewrite-playbook.md §3 合并配方` 这种能对上的形式')
+        # ★ 2026-10-24：格式过了不算数 —— 再核**原文锚点**是否真的出自那份文件
+        _ch, _cs = verify_basis_citations(text)
+        issues.extend(_ch)
+        _soft.extend(_cs)
+    _soft.extend(check_rewrite_order(text))
+
     return issues, _soft
 
 
@@ -640,6 +740,402 @@ def parse_reworked_chapters(root: Path):
         if _r >= 1:
             out.add(_n)
     return out, '', {'counts': counts, 'unknown': sorted(set(unknown))}
+
+
+# =========================================================================
+# 闸门③ 指标回归 & 闸门④ 交付宣告（2026-10-24）
+#
+#   上一轮的两个真实失败，都属于「**自证合格**」这一类：
+#     ① 清明喻把平均句长压到 17.9 跌破硬线 —— 改 A 坏 B，报告看不出是它改坏的；
+#     ② 命中率中位 12%、十章全在 20% 硬线下，档案写"可以交付"，
+#        把 43% 的句首代词和 13–14 的平均句长记成"留待资金宽裕时"。
+#
+#   ★ 共同机制：**执行者给自己发合格证**。凡是这类，机器必须插一手 ——
+#     要么给出两个时间点的客观对比（回归），要么强制把"没做完"写成一句
+#     有名字的豁免（indicator-waived），而不是一句"留待"。
+# =========================================================================
+BU_WORDS = ('平均句长', '超长句', 'p90', '句首引号', '对话占比', '长对话',
+            '数字密度', '现实锚定', '具体性')
+CUT_WORDS = ('句首代词', '代词', '破折号', '身体部位', '明喻', '情绪词')
+DELIVERY_WORDS = ('可以交付', '可交付', '准予交付', '达到交付标准')
+DEFER_WORDS = ('留待', '待补', '后续补', '以后再', '日后再', '暂不处理',
+               '本轮不治', '资金宽裕', '下轮再')
+WAIVER_TOKEN = 'indicator-waived'
+
+
+def check_rewrite_order(text: str):
+    """「先补足、后压住」的顺序 → 软提示。
+
+    只做软提示：顺序好坏要看段落耦合，机器判不严。但**「先压后补」是实测踩过的坑**
+    （压明喻顺手把句长压破线），提示一句成本极低。
+    """
+    hd, rows = None, []
+    for ln in text.split('\n'):
+        st = ln.strip()
+        if not st.startswith('|'):
+            continue
+        cells = [c.strip() for c in st.strip('|').split('|')]
+        if hd is None:
+            if any('缺陷' in c for c in cells):
+                hd = next(i for i, c in enumerate(cells) if '缺陷' in c)
+            continue
+        if not cells or all(set(c) <= set('-: ') for c in cells):
+            continue
+        d = cells[hd] if len(cells) > hd else ''
+        if any(w in d for w in CUT_WORDS):
+            rows.append('cut')
+        elif any(w in d for w in BU_WORDS):
+            rows.append('bu')
+    if 'cut' in rows:
+        i_cut = rows.index('cut')
+        if 'bu' in rows[i_cut + 1:]:
+            return ['方案表顺序是「先压后补」——**实测代价**：压明喻顺手把平均句长压破硬线'
+                    '（ch1 18.1→17.9），然后只能再补长句。**先补足、再压住**：'
+                    '补足会把句长／引号／情绪配比一起带回来，压住不会']
+    return []
+
+
+def _load_metrics(p):
+    try:
+        d = json.loads(read_text(p))
+        return d if isinstance(d, dict) and isinstance(d.get('items'), dict) else None
+    except Exception:
+        return None
+
+
+def _ch_of(name: str):
+    m = re.search(r'第\s*0*(\d+)\s*章', name)
+    return int(m.group(1)) if m else 0
+
+
+def check_metric_regression(root: Path):
+    """初稿达标 → 复跑跌破 = **改写改坏的**（不是初稿的缺陷）。"""
+    out = []
+    meta = root / 'chapters' / '_meta'
+    if not meta.is_dir():
+        return out
+    for bp in sorted(meta.glob('*指标基线*.json')):
+        lp = bp.with_name(bp.name.replace('指标基线', '指标最新'))
+        if not lp.is_file():
+            continue
+        b, l = _load_metrics(bp), _load_metrics(lp)
+        if not b or not l:
+            continue
+        bi, li = b['items'], l['items']
+        reg = [(k, bi[k].get('desc', k)) for k in bi
+               if k in li and bi[k].get('grade') != 'FAIL' and li[k].get('grade') == 'FAIL']
+        if not reg:
+            continue
+        ch = _ch_of(bp.name)
+        plan = find_rewrite_plan(root, ch) if ch else None
+        ptext = read_text(plan) if plan else ''
+        missed = [(k, dd) for k, dd in reg if k not in ptext and dd not in ptext]
+        tail = ('　→ 其中 %d 项连方案表里都没提，说明不是"权衡过的代价"，是没看见。'
+                % len(missed)) if missed else ''
+        out.append('【指标回归】第 %d 章有 %d 项**初稿达标、复跑跌破**：%s ——'
+                   '这是改写改坏的，不是初稿的缺陷%s\n'
+                   '      → 要么改回去，要么把这项写进方案表说明为什么是必要代价。'
+                   % (ch, len(reg), '、'.join(dd for _, dd in reg), tail))
+    return out
+
+
+def check_delivery_claim(root: Path):
+    """档案写"可以交付"时，未闭合项必须显式豁免 → (硬, 软)。"""
+    hard, soft = [], []
+    qc = root / '04-质检档案.md'
+    if not qc.is_file():
+        return hard, soft
+    text = read_text(qc)
+    if not any(w in text for w in DELIVERY_WORDS):
+        return hard, soft
+    lines = text.split('\n')
+
+    # 豁免按**章**作用域判定 —— 不是"上下三行有就行"。
+    #   理由：豁免天生是"对某一章的某项指标让步"，写成散落在文首的全局豁免会让
+    #   一处豁免遮住十章（那是放行，不是豁免）。
+    _heads = [i for i, l in enumerate(lines)
+              if re.match(r'^#{1,4}\s*第\s*0*\d+\s*章', l.strip())]
+
+    def _sec(i):
+        prev = [k for k in _heads if k <= i]
+        if not prev:
+            return '\n'.join(lines)
+        st = prev[-1]
+        nxt = _heads.index(st) + 1
+        en = _heads[nxt] if nxt < len(_heads) else len(lines)
+        return '\n'.join(lines[st:en])
+
+    defer = []
+    for i, ln in enumerate(lines):
+        if any(w in ln for w in DEFER_WORDS) and WAIVER_TOKEN not in ln:
+            if WAIVER_TOKEN not in _sec(i):
+                defer.append(ln.strip()[:64])
+    if defer:
+        hard.append('【交付宣告 vs 未闭合项】档案里写了"可以交付"，同时有 %d 处延期条款没走豁免：\n'
+                    '      · %s\n'
+                    '      → "留待/待补"不是完成，是把不合格顺延。要么本轮改完，要么写成\n'
+                    '        `indicator-waived: 第NN章，<指标> 让步理由≥8字`'
+                    '（execution-contract.md 第 269 行）'
+                    % (len(defer), '\n      · '.join(defer[:3])))
+
+    meta = root / 'chapters' / '_meta'
+    bad = []
+    if meta.is_dir():
+        for lp in sorted(meta.glob('*指标最新*.json')):
+            d = _load_metrics(lp)
+            if not d or not (d.get('fails') or 0):
+                continue
+            ch = _ch_of(lp.name)
+            seg = ''
+            for i, ln in enumerate(lines):
+                if re.search(r'第\s*0*%d\s*章' % ch, ln):
+                    seg = _sec(i)
+                    break
+            if WAIVER_TOKEN not in seg:
+                bad.append('第%d章 仍有 %d 项 FAIL' % (ch, d['fails']))
+    if bad:
+        hard.append('【交付宣告 vs 指标未过】%s\n'
+                    '      → 命中率/项数没过线就写"可以交付"，等于自己给自己发合格证。\n'
+                    '        要么改完，要么在该章的档案段里写 `indicator-waived: …` 交作者裁定'
+                    % '；'.join(bad))
+
+    if '五项测试' in text or '四问' in text:
+        miss = []
+        if '最该重写' not in text:
+            miss.append('「最该重写的一处」')
+        if '10%' not in text:
+            miss.append('「删 10% 后是否更好」')
+        if not ('评委' in text or '评审数' in text):
+            miss.append('「评委数」')
+        if miss:
+            soft.append('五项测试报告缺收尾项：%s —— `review-agent.md` 模板要求三项都在；'
+                        '缺了说明是"抽一句试读"，不是照模板跑' % '、'.join(miss))
+    return hard, soft
+
+
+# =========================================================================
+# 闸门⑤ 初稿装包（2026-10-24）
+#
+#   问：Agent 写初稿时，"教它怎么写"的那些内容到底在不在它的上下文里？
+#
+#   答（before）：**文档要求了，机器不验。** 动作 3/4 的读点是「通读速查卡 + 查表 2–3 节」，
+#   而唯一"不靠自觉"的那条路径是**任务包**（19 槽位把配额卡/人类范本/本书最佳段落/
+#   口吻宪法/实物清单/改写配方**编译进上下文**）。可 `make_task_package.py --check`
+#   只有**跑了才生效**——`check_batch_gate.py` 里对"任务包"零落点。
+#   于是串行模式下，Agent 只要不跑那条命令，就是**裸写**：手里只有一个指标目标和一份细纲。
+#
+#   实测代价（作者项目）：初稿一出来 14 项硬门失败（平均句长 12.0／量词 20.27／
+#   作者在场 0.47），还在补"作者在场"时写出 A 级禁用句式「不是 X，是 Y」——
+#   **若配额卡在上下文里，这两件事在结构上都不会发生**。
+#
+#   所以判据是文件事实：**有正文 → 必须有任务包**。
+#   它不证明"读了哪几本指南"（那测不出），它证明"浓缩层当时在不在手上"。
+# =========================================================================
+BRIEF_WAIVER = 'brief-waived'
+# 「教怎么写」的槽位：配额卡／人类范本／文风基因／声音预置／口吻宪法／实物清单／加法菜单／本书最佳段落／改写配方
+#   —— 这九个待填，等于"写法没进上下文"；其余槽位待填只是资料没备齐。
+CORE_BRIEF = {'quota_card', 'human_exemplar', 'batch_global', 'voice_preset',
+              'voice_charter', 'concrete_list', 'additive_menu', 'best_of_book',
+              'fix_recipe'}
+
+
+def _waived_chapters(root: Path):
+    """`05-创作台账.md` 里 `brief-waived:` 记录覆盖的章号集合。"""
+    p = root / '05-创作台账.md'
+    if not p.is_file():
+        return set()
+    out = set()
+    for ln in read_text(p).split('\n'):
+        if BRIEF_WAIVER not in ln:
+            continue
+        for m in re.finditer(r'第\s*0*(\d+)\s*[–\-~～至]\s*0*(\d+)\s*章', ln):
+            a, b = int(m.group(1)), int(m.group(2))
+            out |= set(range(min(a, b), max(a, b) + 1))
+        for m in re.finditer(r'第\s*0*(\d+)\s*章', ln):
+            out.add(int(m.group(1)))
+    return out
+
+
+# ── 任务包身份校验（2026-10-24）──────────────────────────────────────────
+#   作者问："任务包是不是只装了一次？" 两种坏形态：
+#     ① **只给第一章装** → 已被缺包闸拦住（每章要有自己的文件）；
+#     ② **复制第一章的包改名当第二章用** → 槽位是满的，缺包闸看不出来。
+#
+#   ②才是真漏洞：复制比重新装配便宜得多，而"槽位满"完全符合 `--check`。
+#   可机器验的三个指纹（都来自包自身与项目事实的**交叉**，不是自述）：
+#     · `meta` 槽里的「章号 N」必须等于文件名章号；
+#     · 第 N 章（N>1）的 `prev_tail` 不许是"本书首章，无上章"；
+#     · `prev_tail` 的内容必须能在第 N−1 章正文里找到（首 24 字）。
+#   前两条是**硬矛盾**（零假阳性）：第 2 章不可能没有上一章。
+#   第三条只做软提示 —— 上一章在装包后被改过也会对不上，那是"包旧了"，不是造假。
+_PKG_META_RX = None
+
+
+def _pkg_slots(text):
+    out = {}
+    for m in re.finditer(r'<!-- slot:([a-z_]+) [^>]*-->(.*?)<!-- /slot:\1 -->', text, re.S):
+        out[m.group(1)] = m.group(2).strip()
+    return out
+
+
+def _slot_text(body: str) -> str:
+    """去掉槽位正文里的标题行与省略号标记 —— 只留真内容。
+
+    为什么必须去：槽位渲染成 `## 上一章真实结尾` + 正文，若直接把槽位当正文比对，
+    **永远对不上**（标题不在上一章里）。第一版就这么错了 —— 连"真重装"的包也提示
+    "对不上"，**一个会误报的软提示等于没有提示**。
+    """
+    keep = [ln for ln in (body or '').split('\n') if not ln.strip().startswith('#')]
+    return '\n'.join(keep).strip().strip('…⋯.。 ')
+
+
+def _prev_chapter_text(root: Path, n: int):
+    for pat in ('第%02d章*.md' % (n - 1), '第%d章*.md' % (n - 1)):
+        for p in (root / 'chapters').glob(pat):
+            if p.parent.name == '_meta':
+                continue
+            return read_text(p)
+    return ''
+
+
+def check_package_identity(root: Path, pkg_dir: Path):
+    """→ (硬问题列表, 软提示列表)。只有硬问题阻塞。"""
+    hard, soft = [], []
+    for pk in sorted(pkg_dir.glob('*任务包.md')):
+        m = re.match(r'第\s*0*(\d+)\s*章', pk.name)
+        if not m:
+            continue
+        n = int(m.group(1))
+        slots = _pkg_slots(read_text(pk))
+        meta = slots.get('meta', '')
+        mm = re.search(r'章号\s*(\d+)', meta)
+        if mm and int(mm.group(1)) != n:
+            hard.append('【任务包错配】`%s` 里写的是「章号 %s」，文件名是第 %d 章 ——'
+                        ' 这是把别的章的包复制过来改名（或装错了章）。\n'
+                        '      → 每个包都必须用 `--chapter %d --write` 现装：'
+                        '`prev_tail`／`实物清单`／`已用过的开场章末型` 全是逐章变化的。'
+                        % (pk.name, mm.group(1), n, n))
+            continue
+        if n <= 1:
+            continue
+        tail = slots.get('prev_tail', '')
+        if '本书首章' in tail:
+            hard.append('【任务包错配】第 %d 章的包在 `prev_tail` 写着「本书首章，无上章」——'
+                        ' 这是第 1 章的包被沿用/复制。\n'
+                        '      → 第 %d 章的上一章是第 %d 章，包必须重新装。'
+                        % (n, n, n - 1))
+            continue
+        prev = _prev_chapter_text(root, n)
+        head = _norm_cite(_slot_text(tail))[:24]
+        if prev and len(head) >= 12 and head not in _norm_cite(prev):
+            soft.append('第 %d 章的包：`prev_tail` 与第 %d 章正文对不上 —— 可能是上一章在装包后改过'
+                        '（包旧了），也可能是复制来的。**重新跑一次 `--chapter %d --write`** '
+                        '比事后查便宜。' % (n, n - 1, n))
+    return hard, soft
+
+
+def check_draft_briefing(root: Path):
+    """初稿装包闸：有正文的章必须有任务包，且没有待填槽位。"""
+    out = []
+    chs = []
+    for p in sorted((root / 'chapters').glob('第*章*.md')):
+        if p.parent.name == '_meta':
+            continue
+        m = re.match(r'第\s*0*(\d+)\s*章', p.name)
+        if m:
+            chs.append(int(m.group(1)))
+    if not chs:
+        return out
+
+    # ★ 没有 `05-创作台账.md` = 不是"在跑的真实项目"（多半是测试夹具/半成品目录）。
+    #   SKILL 动作 1 起就必须读台账，所以"缺台账"本来就是另一条错，
+    #   不该由本闸重复判 —— 这条同时避免把夹具当成裸写项目告警。
+    if not (root / '05-创作台账.md').is_file():
+        return out
+
+    waived = _waived_chapters(root)
+    pkg_dir = root / '任务包'
+
+    # ★★ 生效点自适应（2026-10-24）——
+    #   本项目**第一次装包的那一章**才算"机制生效"，之后缺包才硬拦。
+    #   为什么不能一律硬拦：这违反了本项目自己的规矩「**新必填字段不追溯旧稿**」
+    #   （见本文件上方 concrete_list / 剧情卡两次加字段时的注记）——
+    #   一加规则就把前十章全判违规，是**假阳性**，而本项目对假阳性的态度是零容忍。
+    #   第一次装包之前的章 = 历史；从它之后 = 当下的违规。
+    pkgs = sorted(int(m.group(1)) for m in
+                  (re.match(r'第\s*0*(\d+)\s*章', q.name) for q in pkg_dir.glob('*任务包.md'))
+                  if m)
+    first_pkg = min(pkgs) if pkgs else None
+    if first_pkg is None:
+        # 从未装过包 → 只提示，不阻塞（可能是历史项目）；但它必须显眼。
+        print('  ⚠ 【本项目从未装配任务包】%d 章正文存在，`任务包/` 目录却是空的 ——\n'
+              '     若这些章写于装包机制之前（2026-10-21）属历史，不追溯；\n'
+              '     **从下一章起必须** `make_task_package.py <项目> --chapter N --write --check`，\n'
+              '     否则闸门将从那次装包的章号起硬拦缺包章。' % len(chs))
+        return out
+
+    missing = [n for n in chs
+               if n >= first_pkg and n not in waived
+               and not (pkg_dir / ('第%02d章-任务包.md' % n)).is_file()]
+    if missing:
+        rng = ('第 %d 章' % missing[0]) if len(missing) == 1 else \
+              ('第 %d–%d 章' % (min(missing), max(missing)) if missing == list(range(min(missing), max(missing) + 1))
+               else '第 ' + '、'.join(str(n) for n in missing) + ' 章')
+        out.append('【初稿裸写】%s 有正文，但没有任务包（`任务包/第NN章-任务包.md`）——\n'
+                   '      说明写初稿时，**配额卡／人类范本原文／本书最佳段落／口吻宪法／实物清单／改写配方\n'
+                   '      都不在上下文里**，手里只有一个指标目标和一份细纲。\n'
+                   '      → 实测代价：初稿一出来 14 项硬门失败（句长 12.0／量词 20.27／在场 0.47），\n'
+                   '        补「作者在场」时还写出 A 级禁用句式「不是 X，是 Y」。\n'
+                   '      → 下一章开工前跑：`make_task_package.py <项目> --chapter N --write --check`\n'
+                   '        （`--check` 缺槽位/超预算/待填残留 → 拒绝开工）\n'
+                   '      → 历史章若确实写于装包机制之前，在 `05-创作台账.md` 写一行\n'
+                   '        `brief-waived: %s，写于装包机制之前` 放行 —— **放行要留名字，不能默认通过**'
+                   % (rng, rng))
+
+    mtp = None
+    if pkg_dir.is_dir():
+        try:
+            import make_task_package as mtp  # 同目录；SLOTS/TODO 复用，避免第二份槽位表
+        except Exception:
+            mtp = None
+    if mtp is None:
+        return out
+
+    for n in chs:
+        if n in waived or n < first_pkg:
+            continue
+        pk = pkg_dir / ('第%02d章-任务包.md' % n)
+        if not pk.is_file():
+            continue
+        try:
+            slots = mtp.parse_package(read_text(pk))
+        except Exception:
+            continue
+        # ★ 只判「教怎么写」的那几个槽位（CORE_BRIEF）。
+        #   其余（元信息／契约／台账条目／世界设定包／作者画面…）是**项目事实**，
+        #   待填它们说明资料没备齐，不等于"没给写法"——混在一起判会让闸门变成噪音源，
+        #   而这个项目对噪音的规矩是：**宁可少拦，不可乱拦**。
+        bad = []
+        for key, title, budget, req, who in mtp.SLOTS:
+            if key not in CORE_BRIEF:
+                continue
+            body = (slots.get(key) or ('', 0, False))[0]
+            if not body or mtp.TODO in body:
+                bad.append(key)
+        if bad:
+            out.append('【任务包空着就开工】第 %d 章的任务包里，**教怎么写**的槽位还是待填：%s ——\n'
+                       '      → 这些槽位就是"怎么写"本身（配额卡／人类范本／文风基因／声音预置／'
+                       '口吻宪法／实物清单／加法菜单／本书最佳段落／配方）。\n'
+                       '        空着写初稿 = 手里只有一个指标目标，写法全靠即兴。\n'
+                       '      → 补齐后 `--check` 通过再动笔。'
+                       % (n, '、'.join('`%s`' % x for x in bad[:5])))
+
+    # ★ 身份校验：确认这些包是**各自的章**，不是第一章复制十份
+    _id_hard, _id_soft = check_package_identity(root, pkg_dir)
+    out.extend(_id_hard)
+    for _h in _id_soft:
+        print('  ⚠ ' + _h)
+    return out
 
 
 def main():
@@ -1266,6 +1762,13 @@ def main():
             '      → 触发即停（execution-contract.md 第六节五拍处置）：停 / 名 / 锚 / 新计划 / 记。\n'
             '        不要把第 4 章也写成同一型——换型比改文便宜。'
         )
+
+    # ★ 2026-10-24 新增：回归闸 + 交付闸（都是"自证合格"类失败的机器对手）
+    blockers.extend(check_metric_regression(root))
+    blockers.extend(check_draft_briefing(root))
+    _dlv_hard, _dlv_soft = check_delivery_claim(root)
+    blockers.extend(_dlv_hard)
+    soft_hints.extend(_dlv_soft)
 
     if args.json:
         print(json.dumps({

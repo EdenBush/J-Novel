@@ -22,7 +22,7 @@
     ③ **校验**：`--check` 检查必填齐备 + 未超预算 + 没有"待主编填"残留。
        **缺槽位 = 拒绝开工** —— 把"记得填"变成"编译不过"。
 
-★ 槽位总数 = **18**（2026-10-13 起，v7.6.0「世界引擎」）。以 `len(SLOTS)` 为准，
+★ 槽位总数 = **19**（2026-10-21 起；第 19 个是 `fix_recipe`，v7.6.0「世界引擎」）。以 `len(SLOTS)` 为准，
   下面的报告都是动态算的；这一行只是为了让"18"这个数字在文件里可被 grep 到
   （此前只在运行时输出里出现）。
   最近一次新增是 `voice_charter`（**口吻宪法**，治"**我们对声音只有定义、没有样本**"——
@@ -98,6 +98,11 @@ SLOTS = [
     #    不是包写胖了 —— 放宽容量的正确做法，而不是放宽判据。
     ('prev_tail', '上一章真实结尾', 900, True, 'script'),
     ('diagnosis', '诊断句（仅重写任务）', 90, False, 'editor'),
+    # ★ fix_recipe（2026-10-21）：按工单的缺陷类型，从 rewrite-playbook 抽对应节的核心配方。
+    #   它补的是最后一层：报告只说"查哪一节"（索引），而那一节的内容还在文件里、要执行者
+    #   自己去 Read —— 于是最常见的结局是它照 L1 的动作名即兴写，指标变绿但不是范本里那种写法。
+    #   现在由编译器按缺陷项抽节，**内容直接进上下文**（给原文不给路径）。
+    ('fix_recipe', '改写配方（按本章缺陷类型抽节，给原文不给路径）', 400, False, 'script'),
     # ── 后段：给"该怎么写"的当前书事实（最高显著性）──────────────
     # ★ `rhythm_base`（2026-09-24 新增）：节律占质检调用约 26%，是第二大返工源，
     #   而任务包里此前**没有任何节律槽位**。按"**给事实不给目标**"给已写章节的实测值：
@@ -198,7 +203,7 @@ SLOTS = [
     #   · 为什么**必填**：判据 =「**后期修它是否显著贵于前期**」—— 加法层缺了，稿子会退化成
     #     白开水，后期修要**重写句子**（贵）；且"本章偏哪几项"**本身就需要一次判断**。
     #     确实不适用时写一句显式说明，**不许留空**（强制做出一次判断 > 静默缺失）。
-    ('additive_menu', '本章加法菜单（3–5 招，按偏低项挑）', 250, True, 'editor'),
+    ('additive_menu', '本章加法菜单（3–5 招，按偏低项挑，含挑中那几招的做法）', 500, True, 'editor'),
     # ★ `human_exemplar`（2026-10-09 新增）：**文档要求了，但编译器从未产出** ——
     #   与 v6.6.0 修的 `lesions` / `author_shot`（「required=False + 赋空串 → 永不产出」）
     #   是**完全同型**的缺陷，只是成因更直白：`SLOTS` 里**根本没有这个槽位**
@@ -505,6 +510,77 @@ def _word_target(proj: Path) -> str:
     return '目标字数：见 02-写作计划.json'
 
 
+# =========================================================================
+# fix_recipe（2026-10-21）：把工单里该章的缺陷类型编译成"配方 + 指向"
+#
+#   治最后一层：报告告诉执行者"查哪一节"（索引），但那一节的**内容还在文件里，
+#   要它自己去 Read** —— 于是最常见的结局是它照 L1 的动作名（"插入铺陈句"）
+#   即兴写，指标变绿但不是范本里那种写法。现在由编译器按缺陷项抽节，
+#   **内容直接进上下文**（给原文不给路径）。
+#
+#   ⚠️ 为什么按**工单的缺陷类型**映射、而不是按 17 项指标：工单那列是
+#      `make_workorder.py` **机器写入**的（客观事实），而 17 项指标在任务包
+#      装配时并不在手边（要另外跑一次脚本）。**用已经在文件里的事实，不用再判断一次。**
+#   ⚠️ 为什么**只抽 rewrite-playbook**：它的节标题格式统一（`## N. 标题`），
+#      `_section()` 能可靠切分；其余几家标题格式不同，宁给指向不给错内容。
+# =========================================================================
+FIX_RECIPE_BY_DEFECT = {
+    '节律': ('平均句长过短', '句首代词超标', '句首引号不足'),
+    '词汇': ('情绪词过低', '明喻超标', '数字密度过低'),
+}
+FIX_RECIPE_POINTER = {
+    '节律': 'human-rhythm.md 规则 1–7（句子怎么组织）',
+    '词汇': 'human-quota.md（人味配额）',
+    '字数': 'chapter-craft.md（场景质感怎么补）',
+    '重复': 'check_repetition.py 的报告（跨章开场/章末同质）',
+    '连续性': 'continuity-check.md（衔接三查 + 逻辑 BUG 四查）',
+    '世界': 'world-engine.md（机制卡六格）',
+    '契约': 'flows/phase3-writing.md 的接口契约',
+}
+
+
+def _read_wo_defects(proj: Path, chapter_no: int):
+    """从 06-章节工单.md 读该章的「缺陷类型」列 → `[标签, ...]`。"""
+    p = proj / '06-章节工单.md'
+    if not p.is_file():
+        return []
+    for ln in read_text(p).split('\n'):
+        st = ln.strip()
+        if not (st.startswith(f'| 第{chapter_no}章 ') or st.startswith(f'| 第{chapter_no}章|')):
+            continue
+        cells = [c.strip() for c in st.strip('|').split('|')]
+        if len(cells) > 3 and cells[3] not in ('—', ''):
+            return [x.strip() for x in cells[3].replace('、', ' ').split() if x.strip()]
+    return []
+
+
+def _fix_recipe(proj: Path, chapter_no: int) -> str:
+    """按缺陷类型抽配方；抽不到 → 给指向或 TODO，**不许编内容**。"""
+    defects = _read_wo_defects(proj, chapter_no)
+    if not defects:
+        return (f'{TODO}：本章工单里没有缺陷类型（先跑 '
+                f'`make_workorder.py --archive {chapter_no}`）】')
+    guide = Path(__file__).resolve().parent.parent / 'references' / 'guides' / 'rewrite-playbook.md'
+    if not guide.is_file():
+        return f'{TODO}：找不到 references/guides/rewrite-playbook.md】'
+    text = read_text(guide)
+    parts = []
+    for d in defects:
+        for kw in FIX_RECIPE_BY_DEFECT.get(d, ())[:1]:
+            sec = _section(text, kw)
+            if sec:
+                parts.append(f'【{d} → {kw}】\n{sec[:250].strip()}')
+                break
+    if parts:
+        return '\n\n'.join(parts)[:400]
+    ptr = [f'· {d} → {FIX_RECIPE_POINTER[d]}' for d in defects if d in FIX_RECIPE_POINTER]
+    if ptr:
+        return '【本章缺陷类型不在自动映射内 —— 只给指向，去查那一节】\n' + '\n'.join(ptr)
+    return f'{TODO}：缺陷类型 {"、".join(defects)} 无对应配方，按 deai-entry 第 3 步索引表查】'
+
+
+
+
 def build(proj: Path, chapter_no: int, rewrite: bool = False):
     """返回 {slot_key: 内容}；脚本填不了的槽位返回 TODO 标记。
 
@@ -626,6 +702,9 @@ def build(proj: Path, chapter_no: int, rewrite: bool = False):
                         '没有则写「无」】')
     fills['diagnosis'] = (f'{TODO}：诊断：{{一句话}} / 本稿必须不再犯：{{一句话}}】'
                           if rewrite else '')
+    # ★ fix_recipe（2026-10-21）：按工单的缺陷类型抽 rewrite-playbook 对应节的核心配方。
+    #   非 rewrite 任务也给 —— 初稿质检后马上要改，配方那时就该在手边。
+    fills['fix_recipe'] = _fix_recipe(proj, chapter_no)
     # ★ 新增：脚本可自填的四项（0 reasoning token）
     fills['rhythm_base'] = _rhythm_base(proj, chapter_no)
     fills['quota_card'] = _quota_card()
