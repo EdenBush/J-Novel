@@ -22,7 +22,8 @@
     ③ **校验**：`--check` 检查必填齐备 + 未超预算 + 没有"待主编填"残留。
        **缺槽位 = 拒绝开工** —— 把"记得填"变成"编译不过"。
 
-★ 槽位总数 = **19**（2026-10-21 起；第 19 个是 `fix_recipe`，v7.6.0「世界引擎」）。以 `len(SLOTS)` 为准，
+★ 槽位总数 = **23**（2026-11-01 核对；v9.0 加到 22，v11.0 新增 `consequence_chain` → 23）。
+  以 `len(SLOTS)` 为准，
   下面的报告都是动态算的；这一行只是为了让"18"这个数字在文件里可被 grep 到
   （此前只在运行时输出里出现）。
   最近一次新增是 `voice_charter`（**口吻宪法**，治"**我们对声音只有定义、没有样本**"——
@@ -55,7 +56,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _shared import (CONCRETE_HEAD, ensure_utf8_stdio,  # noqa: E402
                      find_chapter_files, find_meta_file, parse_concrete_list,
-                     read_text)
+                     parse_exemplar_sections, read_text)
 
 # ★ 必须在 import 同族脚本之前调用（它们也会调，但幂等）
 ensure_utf8_stdio()
@@ -84,14 +85,41 @@ SLOTS = [
     # ── 前段：硬约束与负向提示（必须在动笔前就被"看到"）──────────
     ('meta', '本章元信息', 60, True, 'script'),
     ('contract', '接口契约（冻结）', 420, True, 'script'),
+    # ★★ `promise_debt`（2026-10-26 v9.0）：**连贯的执行点**。
+    #   此前 brief 只带 `prev_tail`（上一章真实结尾 800 字）——写手知道"刚才发生了什么"，
+    #   但**不知道"读者在等什么"**。而读者追读的原因恰恰是后者。
+    #   实测缺口：`03-状态台账` 管"世界有没有矛盾"，`伏笔表` 管"信息埋在哪收"，
+    #   没有任何一处管"谁欠读者什么、欠了多久" → 「挖坑不填 / 越看越乱 / 赢了跟没赢一样」
+    #   这三种读者抱怨，旧体系**一条都抓不到**（见 guides/promises.md 第零节）。
+    #   位置：紧跟 `contract`（都是硬约束，必须在"怎么写"之前被看到）。
+    ('promise_debt', '本章必须还的债（承诺账到期的条目）', 420, True, 'script'),
+    # ★★ `story_ledger`（同上）：L1 故事层的执行点。与 `concrete_list` 同一份文件、
+    #   同一个时点，但回答不同问题：那是"这一章有什么东西"，这是"这一章发生了什么事"。
+    #   在它之前，写手只拿到前者 → 能写出"具体，但没发生任何事"的章节。
+    ('story_ledger', '本章故事账（选择/代价/位移/可删性/欲望）', 500, True, 'script'),
+    # ★★ `consequence_chain`（2026-11-01 v11.0）——L1 故事层的**第二根轴**。
+    #   · **治什么**：模型"用代理条件代替后果推演"。实测（三次 POV，见 guides/consequence-chain.md）：
+    #     盲盒 8/8 能复述规则、5/8 仍把封存砸在垃圾盒上（触发前只核对余额）；
+    #     路口里事先点名"会闯红灯"的 6 辆车，一辆都没放行，全部卷进事故。
+    #     写作里的同型物：**"符合人设／推进剧情／伏笔回收了／情绪词够了"全是代理条件。**
+    #   · **为什么不能写成一句提醒**：`v3-prompt`（一句"请推演二阶后果"）实测分数 2226、
+    #     砸盒率**不降**；`v2-harness`（把状态摆在眼前）1879，**更差**；
+    #     `v4-belief`（让它脑内维护状态）1780，**全场最差** —— **脑内维护比不维护更糟**。
+    #     唯一有效的是 `v1-clear`：**把隐含规则写成明文 + 给出一个它不知道自己有的选项**（2396，砸盒 5/8→1/8）。
+    #     → 所以这里给的是**固定的五栏格式 + 三条可机械判的判据**，而不是形容词。
+    #   · **为什么紧挨 `story_ledger`**：同文件、同时点、同一个 30 秒；
+    #     但一个管"该不该存在"（点），一个管"会往哪儿长"（线）。**顺序按作用域从大到小**不适用这里，
+    #     这里按"判断顺序"排：先立得住，再谈往哪儿长。
+    ('consequence_chain', '本章后果链（动作/一阶/二阶/没看见的路/误判）',
+     700, True, 'script'),
     # ★ `lesions` 从"可选且永不产出"改为**必填**（bug 修复，见 CHANGELOG v6.6.0）：
     #   它此前 required=False + 赋空串 → render() 静默跳过 → 校验器也不报。
     #   而"已知病灶不传递给写手"= 同一类缺陷逐章复发，正是前移该消掉的东西。
     #   没有病灶时写「无」——**强制做出一次判断**，比静默缺失好。
-    ('lesions', '本批已知病灶（占位式指令：这里要放什么）', 220, True, 'editor'),
+    ('lesions', '本批已知病灶（占位式指令：这里要放什么；脚本按缺陷帕累托自动生成）', 460, True, 'script'),
     # ── 中段：参考性事实 ─────────────────────────────────────
-    ('ledger', '状态台账·本章出场人物条目', 620, True, 'editor'),
-    ('world_pack', '世界设定包（按本章裁剪）', 820, True, 'editor'),
+    ('ledger', '状态台账·本章出场人物条目（脚本自动按角色名匹配）', 900, True, 'script'),
+    ('world_pack', '世界设定包（脚本按专名表/规则/场景卡自动裁剪）', 1000, True, 'script'),
     ('used_devices', '本批已用过的开场 / 章末型（避开它们）', 220, True, 'script'),
     # ⚠️ 预算必须给**段落粒度**留余量：`_tail` 是按段往回拼到 ≥800 字，
     #    多带一段就会溢出（实测 882 > 820）。这种"超预算"是**度量口径**问题，
@@ -162,8 +190,31 @@ SLOTS = [
     #        "**这个声音好不好**"**不许脚本判**（那是质检子代理/人的活，见铁律一）。
     ('voice_charter', '口吻宪法（本书声音：人格 / 样本 / 禁令）',
      2000, True, 'script'),
-    ('batch_global', '批次全局三件套（文风基因 / 锚点示例 / 句法基线）',
-     900, True, 'script'),
+    # ★★★ `craft_cards`（2026-10-26 v9.0）——**本轮最重要的一处架构改动**。
+    #   它替掉的是"读指南"这个机制本身，而不是某一本指南。
+    #
+    #   · **为什么必须替掉**（这是算术，不是判断）：`references/guides/` 共 54 本 / 44.3 万字符
+    #     ≈ 30 万 token；单章"该读的都读"去重 21 本 ≈ **15.2 万 token**。
+    #     而 `execution-contract.md` 自己规定「每次调用平均重发 >100k = 纪律失守」、
+    #     调用预算 **10–18 次/章** → **读点要求与成本纪律在数学上互相否定**。
+    #     执行者只能二选一，而**成本有审计（audit_tokens.py 能查）、读点没有审计**，
+    #     于是它选成本、跳过读点 —— **而且选得对**。
+    #     这就是"改写阶段那些指南没被读取"反复复发、改了多遍仍无效的真因：
+    #     **不是指令不够狠，是清单不可执行。**
+    #
+    #   · **换法**：不再要求读，改成**编译**。`references/cards/` 里每张卡是一页纯操作
+    #     （≤1200 字、**不含阈值**），由 `_craft_cards()` 按本章性质挑 3–4 张内联进来。
+    #     → 写手拿到 ≈3000 字就能动笔，**本章不需要读任何 guide**。
+    #
+    #   · **为什么卡里不许有阈值**：`quality-constitution.md` 第三节的"表述规范"——
+    #     脚本用数字（判据），写手用形态（动作）。给写手看"平均句长 23–37"，
+    #     它会去做"统计意义上的最小改动"（指标一进区间就收手），而不是"把这一句写长"。
+    #     ⚠️ 但 `quota_card` **保留不动**：它是 A/B 实测有效的护栏（超长句 1.40→4.41），
+    #     删掉它是拿已验证的东西去赌未验证的。**卡管"朝哪儿写"，配额卡管"别掉出去"。**
+    ('craft_cards', '本章工艺卡（一页一主题，3–4 张；写手唯一要读的"怎么写"）',
+     4200, True, 'script'),
+    ('batch_global', '批次全局三件套（细纲没有则脚本从圣经+上一章正文拼）',
+     1000, True, 'script'),
     # ★ `voice_preset`（2026-09-24 新增）：文档要求"**动笔前**定的三行"
     #   （具体坐标／叙述者立场／留白点），且"没写这三行 = 写前分析未完成"——
     #   但它此前散落在细纲里、无槽位、无校验。实测真实项目 10 章里只有 3 章有这个段，
@@ -184,7 +235,7 @@ SLOTS = [
     #     ⚠️ 2026-10-09：此前注释写的是"紧贴 author_shot"，后来两者之间插进了
     #     `additive_menu` 与 `human_exemplar` —— 所以措辞改成"同区"而不是"紧贴"。
     #     别按字面去数相邻，**顺序的意图是"落在后段"，不是"必须相邻"**。
-    ('concrete_list', '本章实物清单（只属于这一章的东西）', 200, True, 'editor'),
+    ('concrete_list', '本章实物清单（脚本从 _meta 抽）', 320, True, 'script'),
     # ★ `additive_menu`（2026-10-09 新增）：**子代理拿不到"加法层"** —— 已核实的交付点缺口。
     #   速查卡【零】节的配额卡是**四栏**（补足／压住／区间／**加法**），但四栏回答的
     #   全是"**改成什么样**"（多长/多密/多少次），本质是**减法与频率**；
@@ -203,7 +254,7 @@ SLOTS = [
     #   · 为什么**必填**：判据 =「**后期修它是否显著贵于前期**」—— 加法层缺了，稿子会退化成
     #     白开水，后期修要**重写句子**（贵）；且"本章偏哪几项"**本身就需要一次判断**。
     #     确实不适用时写一句显式说明，**不许留空**（强制做出一次判断 > 静默缺失）。
-    ('additive_menu', '本章加法菜单（3–5 招，按偏低项挑，含挑中那几招的做法）', 500, True, 'editor'),
+    ('additive_menu', '本章加法菜单（脚本按章型选 3 招，含做法）', 600, True, 'script'),
     # ★ `human_exemplar`（2026-10-09 新增）：**文档要求了，但编译器从未产出** ——
     #   与 v6.6.0 修的 `lesions` / `author_shot`（「required=False + 赋空串 → 永不产出」）
     #   是**完全同型**的缺陷，只是成因更直白：`SLOTS` 里**根本没有这个槽位**
@@ -219,8 +270,14 @@ SLOTS = [
     #     （与 `author_shot` 同判据：它消除的缺陷——没人味——后期修要付多轮润色）。
     #     确实无适配时刻时写「本章无适配的范本时刻（已查 human-exemplars 目录）」，
     #     **不许留空**：强制做出一次判断，比静默缺失好。
-    ('human_exemplar', '人类范本原文（按"时刻"挑 1–2 段，给原文不给路径）',
-     300, True, 'editor'),
+    # ★ v9.1：`human_exemplar` 由 **editor 手填 → script 自动选段**。
+    #   理由（这条是本次改动里"性价比"最高的一处）：它此前是 TODO，而它的官方逃生口径是
+    #   "本章无适配的范本时刻"——实测后果可以预见：**最强的那根杠杆在实际项目里多半是空的**。
+    #   "给写手一段真人原文"变成了"给写手一句解释为什么没给"。
+    #   按模型机制（放什么检索什么），**真人原文是唯一能真正改变语域的东西**，比任何指令都强
+    #   → **把最强的杠杆做成"可选"，等于把它做成"没有"。**
+    ('human_exemplar', '人类范本原文（按章型自动选 2 段，给原文不给路径）',
+     1200, True, 'script'),
     # ★ `best_of_book`（2026-10-09 新增，v7.2.0 改写工程）：治"**改写目标是指标，不是样例**"。
     #   已核实的根因：改写阶段的问题**探得出来、但改得一般**——因为 Agent 拿到的"目标"
     #   是一串指标区间（"把平均句长提到 23–37"），于是它做的是**统计意义上的最小改动**：
@@ -245,15 +302,15 @@ SLOTS = [
     #     **不许留空**——强制做出一次判断 > 静默缺失。
     #   · 位置：**紧接 `human_exemplar`、在 `author_shot` 之前**——同属**后段正向素材区**
     #     （显著性设计：负向提示在前、正向具体素材在后）。
-    ('best_of_book', '本书最佳段落（按缺陷类型挑的手术样例）',
-     350, True, 'editor'),
+    ('best_of_book', '本书最佳段落（脚本按缺陷类型自动取）',
+     700, True, 'script'),
     # ★ `author_shot`（2026-09-24 修复）：此前 required=False + 赋空串 → **永不产出**。
     #   而 `low-cost-mode.md` 把它列为**必留项**，定位是
     #   「**流水线上最保人味的素材——作者自己的眼睛**」。
     #   判据：它消除的缺陷（人味不足）**后期修要付多轮润色**，属于"后期修显著贵于前期"
     #   → 按这个判据它**必须是必填**，不该是"（若有）"。
     #   放在最后一位：它是**正向、具体、要照着写**的素材，给最高显著性。
-    ('author_shot', '作者画面（脚手架原话）', 200, True, 'editor'),
+    ('author_shot', '作者画面（脚本从脚手架自动抽；无则显式说明）', 420, True, 'script'),
 ]
 # ⚠️ 从 5000 提到 6000 的理由（2026-09-24）：
 #   新增的 `quota_card` 是**一次性固定成本**（全书同一张卡，不随章数增长），
@@ -275,11 +332,75 @@ SLOTS = [
 #     "常驻的必须短"是这条设计的前提，不是它的例外。
 #   · 不造假闸门：8000 是**总上限**，不是目标；实测填满约 6.3–6.6k 字，
 #     余量仍是留给主编填槽位的。
-TOTAL_BUDGET = 8000
+# ⚠️ 从 8000 提到 11000 的理由（2026-10-26 v9.0「编译取代阅读」）：
+#   · 新增三个槽位：`promise_debt`(420) + `story_ledger`(500) + `craft_cards`(4200)。
+#   · **这不是"又一次上调总量"，是一次交换**：`craft_cards` 替掉的是
+#     **单章 21 本指南 ≈ 15.2 万 token 的读点**。11000 字 ≈ 1.6 万 token，
+#     且它是本章**唯一**要读的东西（写手不再读 guides）。
+#   · 上一轮已经证明"靠限制总量来压成本"是错的方向：压的是**被乘数**，
+#     而真正能被压掉的是**读点的存在**——把它换成 3000 字的卡，是净赚。
+#   · ⚠️ 仍守上一条纪律：**按章变化的素材不许靠上调总量解决**。
+#     卡是"一页一主题"的固定件（全书同一套，按章型换），不是每章新写的长文。
+# ⚠️ 从 11500 提到 12000 的理由（2026-11-01 v11.0）——**这是最后一格**：
+#   · 新增 `consequence_chain`(700)。它不是"更多素材"，是**判断的产出物**
+#     （一阶/二阶/没看见的路/误判），而且实测证明**素材替代不了它**
+#     （`v2-harness`：把状态摆在眼前 → 分数更低、砸盒率不降）。
+#   · **12000 正好是 `architecture.md` 第八节自毁条款那条线**（"brief >12000 字就该砍槽位"）。
+#     → 到这里封顶。**下一次要加任何槽位，必须先删掉一个**，不许再动这个数。
+#   · 如果 `--check` 报超预算，砍的顺序写死：**先砍 `craft_cards` 的 4 张到 3 张**（按章换卡），
+#     **不要砍** `consequence_chain` / `story_ledger` / `voice_charter`——
+#     那三个是"判断"，砍掉就退回"写完再补意义"。
+TOTAL_BUDGET = 12000
 TODO = '【待填'
 SLOT_OPEN = '<!-- slot:{key} budget={budget} required={req} -->'
 SLOT_CLOSE = '<!-- /slot:{key} -->'
 _PKG_CHAPTER = re.compile(r'第\s*(\d{1,4})\s*章')
+
+# ══════════════════════════════════════════════════════════════════════
+# 槽位类型标签（v11.1，2026-11-01）
+# ══════════════════════════════════════════════════════════════════════
+# **为什么需要它**（实测：一份填满的包里有 **51 个 `##` 标题**，而只有 2 段要写手动手的）：
+#   23 个槽位此前**全部用同一个 `##` 标题、同一种祈使语气**呈现 ——
+#   于是写手拿到的是一份"51 条要求"的文档，而其中 21 段是**已经定好的事实**或**照着写的素材**。
+#   按模型的失效机制（长上下文里权重按位置衰减 + "能勾选的检查都会被勾选着完成"），
+#   它会把预算花在**打勾**上，不是花在**做事**上。
+#   → 这是 J-Novel 版的"把事后才能算的、和每轮必须做的混在一起"。
+#
+# 三类：〔已定〕不许再议的事实／〔素材〕照着写、不用响应／〔红线〕不许越的边界。
+# ★ **缺省 = 素材**：新加槽位忘了登记 → 只会被降级成"素材"，**不会谎称"已定"**
+#   （错了的方向必须是不利的那个）。
+SLOT_KIND = {
+    'meta': '已定', 'contract': '已定', 'promise_debt': '已定', 'story_ledger': '已定',
+    'consequence_chain': '已定', 'ledger': '已定', 'world_pack': '已定',
+    'used_devices': '已定', 'prev_tail': '已定', 'rhythm_base': '已定',
+    'voice_preset': '已定', 'diagnosis': '已定',
+    'lesions': '红线', 'quota_card': '红线',
+}
+KIND_DEFAULT = '素材'
+
+
+def slot_kind(key: str) -> str:
+    return SLOT_KIND.get(key, KIND_DEFAULT)
+
+
+def _demote_headings(t: str) -> str:
+    """把 `## ` 降成 `### `，**跳过代码围栏内的行**。
+
+    ★ 为什么要跳过：卡片里有 ```markdown 示例块（例如"照这个格式写进 `_meta`"），
+      那里面的大标题是**写手要逐字照抄的内容** —— 降级它 = 让写手往 `_meta` 里写错格式。
+      （本项目已记录过同类事故：对"文本"做的批量变换，必须能区分"正文"与"示例"。）
+    """
+    out, infence = [], False
+    for line in t.split('\n'):
+        if line.lstrip().startswith('```'):
+            infence = not infence
+            out.append(line)
+            continue
+        if not infence and line.startswith('## '):
+            out.append('### ' + line[3:])
+        else:
+            out.append(line)
+    return '\n'.join(out)
 
 
 def _zishu(s: str) -> int:
@@ -496,6 +617,688 @@ def _concrete_list(proj: Path, chapter_no: int) -> str:
         + ['', '判据：每一项搬到别章都不成立。三条硬约束见 guides/specificity-gate.md'])
 
 
+def _story_ledger(proj: Path, chapter_no: int) -> str:
+    """抽本章的「故事账」五格（L1 故事层）。
+
+    ★ 2026-10-26 v9.0：它与 `concrete_list` 是**同一个时点、同一份文件、两种内容**——
+      实物清单管"这一章有什么东西"，故事账管"这一章发生了什么事、值不值得写"。
+      在 v9 之前，写手只拿到前者：于是它能写出"具体但没发生任何事"的章节。
+      这条正是 `quality-constitution.md` 说的"L1 是前两层的前提"。
+
+    ★ 抽不到 → `TODO`（`--check` 拦住）。生效点自适在 `--check` 里不做特殊处理：
+      历史项目本来就没有故事账，`check_story.py` 会判"未启用、不阻塞"；
+      但**新编译的任务包**要求它有——因为包是给"下一章"用的，不是给历史章用的。
+    """
+    p = find_meta_file(proj, chapter_no)
+    if p is None:
+        return (f'{TODO}：找不到 chapters/_meta/第{chapter_no:02d}章-<标题>.meta.md'
+                f'（故事账与实物清单同落此处；五格见 guides/story-ledger.md）】')
+    m = re.search(r'(?m)^##\s*故事账[^\n]*$', read_text(p))
+    if not m:
+        return (f'{TODO}：{p.name} 里没有「## 故事账」段（五格：选择/代价/位移/可删性/欲望；'
+                f'格式见 guides/story-ledger.md 第一节）】')
+    body = read_text(p)[m.end():]
+    nxt = re.search(r'(?m)^##\s', body)
+    body = (body[:nxt.start()] if nxt else body).strip()
+    if not body:
+        return f'{TODO}：{p.name} 的「## 故事账」段是空的】'
+    return ('本章故事账（**动笔前已定；写作时朝它写，不要写完再补意义**）：\n'
+            + body
+            + '\n\n判据：`位移` 必须从什么变成什么；`可删性` 有数字；'
+              '**`可删性 0 处` = 这章是水章，回去改事件，不是改句子**。')
+
+
+def _consequence_chain(proj: Path, chapter_no: int) -> str:
+    """抽本章的「后果链」五栏（v11.0 · L1 故事层的第二根轴）。
+
+    ★ **它和 `story_ledger` 是同一份文件、同一个时点，但回答两个问题**：
+      故事账问"这一章该不该存在"（**点**：选择／代价／位移／可删性／欲望）；
+      后果链问"这一章会往哪儿长"（**线**：一阶／二阶／没看见的路／误判）。
+
+    ★ **为什么必须有它**（实测，见 `guides/consequence-chain.md` 第一节）：
+      V4.1-Flash 的稳定短板不是"不会检查"，是**用代理条件代替后果推演**——
+      盲盒里 8/8 能复述规则，5/8 仍把封存砸在垃圾盒上，因为触发前它只核对余额。
+      写作里的同型物是"符合人设／推进剧情／伏笔回收了"——**全是代理条件**。
+      而**光提醒没用**（`v3-prompt` 实测 2226 分、砸盒率不降），
+      **把状态摆在眼前也没用**（`v2-harness` 1879 分）——
+      **唯一有效的是把隐含后果写成明文、并给出一个它不知道自己有的选项**（`v1-clear` 2396 分）。
+      → 所以这里给的是**填空格式 + 明文 + 三条可机械判的判据**，不是一句"请推演二阶后果"。
+
+    ★ 抽不到 → `TODO`（`--check` 拒绝开工）。和 `story_ledger` 同一条豁免逻辑：
+      历史项目由 `check_story.py` 判"未启用、不阻塞"；但**新编译的包**必须有它。
+    """
+    p = find_meta_file(proj, chapter_no)
+    if p is None:
+        return (f'{TODO}：找不到 chapters/_meta/第{chapter_no:02d}章-<标题>.meta.md'
+                f'（后果链与故事账同落此处；五栏见 guides/consequence-chain.md 第四节）】')
+    text = read_text(p)
+    m = re.search(r'(?m)^##\s*后果链[^\n]*$', text)
+    if not m:
+        return (f'{TODO}：{p.name} 里没有「## 后果链」段'
+                f'（五栏：动作／一阶／二阶／没看见的路／误判；'
+                f'格式见 guides/consequence-chain.md 第四节）】')
+    body = text[m.end():]
+    nxt = re.search(r'(?m)^##\s', body)
+    body = (body[:nxt.start()] if nxt else body).strip()
+    if not body:
+        return f'{TODO}：{p.name} 的「## 后果链」段是空的】'
+    return ('本章后果链（**动笔前已定。写正文时这五栏要各自有落点——'
+            '落不下去 = 当时那条推演是假的**）：\n'
+            + body
+            + '\n\n判据（写之前对着它写，不是写完再对）：\n'
+              '· **`二阶` 必须指到具体章号或场景**。指不到 = 只推了一跳，写的是形容词。\n'
+              '· **四栏里出现"引发冲突／关系变差／埋下伏笔"这类总结词 = 表演式填空**'
+              '（换一本书还成立 = 不是后果）。\n'
+              '· **`误判` 不许写"无"**：这一栏是"全员清醒"唯一的解药——'
+              '人物心里得有一个**错的判断**，那个错会漏到动作里。\n'
+              '· 自问一句：**这一章拿掉之后，下一章第一段要改几个字？0 个 = 这章是空转。**')
+
+
+def _promise_debt(proj: Path, chapter_no: int) -> str:
+    """抽「本章必须还的债」：`08-承诺账.md` 里 `应兑现 == 本章` 且状态未兑现的条目。
+
+    ★ 这是**连贯**的执行点。此前的 brief 只带"上一章真实结尾"（800 字），
+      所以写手知道"刚才发生了什么"，但**不知道"读者在等什么"**——
+      而后者才是读者追读的原因。`promises.md` 是这条机制的说明书。
+
+    ★ 没有承诺账时**不报 TODO**，而是给出"如何建"的一句提示并放行：
+      理由 = 生效点自适应（历史项目不追溯；`check_promises.py` 同样 exit 0）。
+      这里与 `concrete_list` / `story_ledger` 的区别是刻意的：
+      **故事账与实物清单是"本章必需的判断"，承诺账是"全书级的账"**——
+      新项目第一、二章本来就没有可还的债。
+    """
+    f = proj / '08-承诺账.md'
+    if not f.is_file():
+        return ('（本书尚无 `08-承诺账.md`——前两章属正常。'
+                '第 3 章起建立：七列表格，见 guides/promises.md 第一节。'
+                '**本章只需"欠债"**：写完把读者会记着的那件事登记进去。）')
+    txt = read_text(f)
+    rows = []
+    for line in txt.split('\n'):
+        s = line.strip()
+        if not s.startswith('|'):
+            continue
+        cells = [c.strip() for c in s.strip('|').split('|')]
+        if len(cells) < 7 or set(''.join(cells)) <= set('-: '):
+            continue
+        if cells[0].strip() in ('#', ''):
+            continue
+        tag, promise, kind, born, due, status = cells[0], cells[1], cells[2], cells[3], cells[4], cells[5]
+        m = re.search(r'(\d{1,4})', due)
+        if not m:
+            continue
+        due_n = int(m.group(1))
+        if status and any(k in status for k in ('✓', '√', '已兑现', '✗', '×', '作废')):
+            continue
+        if due_n == chapter_no:
+            rows.append(f'· {tag}〔{kind}〕{promise}（第 {born} 章许下，本章到期）')
+        elif due_n < chapter_no:
+            rows.append(f'· {tag}〔{kind}〕{promise}（**已逾期**：应第 {due_n} 章兑现，'
+                        f'本章是第 {chapter_no} 章 → 还掉或显式改期）')
+    if not rows:
+        return ('（本章无到期的债。**那本章只需"欠债"**：写完把读者会记着的那件事'
+                '登记进 `08-承诺账.md`——不登记 = 下一章没人记得它。）')
+    return ('本章必须还的债（**一章最多还 2 笔**；还 5 笔 = 交作业，读起来像结算清单）：\n'
+            + '\n'.join(rows[:4])
+            + '\n\n还债**必须有代价**——否则读者会觉得"这也太容易了"。'
+              '真还不了一定要**显式改期**（在「承诺」列写一句为什么延），不允许无声拖过去。')
+
+
+def _craft_cards(proj: Path, chapter_no: int, ol_seg: str = '') -> str:
+    """按本章性质挑 3–4 张一页卡注入（**写手唯一读的"怎么写"**）。
+
+    ★ 为什么由脚本挑（不靠记忆）：`cards/README.md` 第三节写了规则，
+      但"按章型换卡"这件事一旦靠人记，就会退化成"永远注入同一套"——
+      这正是本体系反复复发的形态（**规则写了、没人执行**）。
+      **能做成脚本的，不要只写成文字。**
+
+    选卡规则（改这里 = 改规则，不在文档里另存一份）：
+      基线：voice + prose + dialogue + ending
+      · 静场章 → dialogue 换 scene（静场章没有对抗，对白不是主战场）
+      · 打斗/追击/冲突章 → dialogue 换 scene（同上：场在打，话少）
+      · 首章 / 卷首 / 新场景断开 → 追加 opening
+      · 本章要新造地点/势力/机制（细纲里有"新"且世界包没有）→ 追加 world
+      · rewrite 模式 → ending 换 revise
+    """
+    cdir = Path(__file__).resolve().parent.parent / 'references' / 'cards'
+    if not cdir.is_dir():
+        return f'{TODO}：找不到 references/cards/（一页卡目录）】'
+
+    seg = ol_seg or ''
+    quiet = '静场' in seg
+    fight = bool(re.search(r'打斗|追击|战斗|厮杀|搏斗|冲突章', seg))
+    fresh = '卷首' in seg or '新场景' in seg
+    new_world = bool(re.search(r'新造|新地点|新势力|新机制|首次出现', seg))
+
+    picks = ['card-voice.md', 'card-prose.md', 'card-dialogue.md', 'card-ending.md']
+    if quiet or fight:
+        picks = [p for p in picks if p != 'card-dialogue.md'] + ['card-scene.md']
+    if chapter_no == 1 or fresh:
+        picks.insert(1, 'card-opening.md')
+    if new_world:
+        picks.append('card-world.md')
+    if not _is_rewrite_hint(seg) and chapter_no == 1:
+        picks.append('card-story.md')
+
+    out, total, skipped = [], 0, []
+    # ★ 卡总量封顶：写手要读得完才有意义。但**超了不许静默丢弃**——
+    #   实测过一次：4 张卡按顺序累加，第 4 张（章末）被 4200 的上限挡掉，
+    #   而"章末最后三行决定读者读不读下一章"恰恰是最不该缺的一张。
+    #   静默丢卡 = "看起来配了、其实没有"，本项目最忌讳的那一类。
+    #   现在：① 上限提到 5200（刚好够 4 张）② 被跳过的卡**写进槽位里**，主编看得见。
+    for name in picks:
+        p = cdir / name
+        if not p.is_file():
+            skipped.append(f'{name}（文件不存在）')
+            continue
+        t = read_text(p).strip()
+        if total + len(t) > 5200:
+            skipped.append(name)
+            continue
+        # ★ v11.1：卡内标题降一级（`##` → `###`）。它们是"本章工艺卡"这一段的**子节**，
+        #   不是 23 个同位槽位之一。降级前实测：一份包里 **51 个 `##`**，
+        #   写手无法从层级上看出一段到底是"要求"还是"素材"。
+        out.append(_demote_headings(t))
+        total += len(t)
+    if not out:
+        return f'{TODO}：references/cards/ 里没有可用的卡】'
+    note = (f'\n\n> ⚠️ 以下卡因总量上限未注入：{"、".join(skipped)}。'
+            f'需要它们时按 `cards/README.md` 单独打开。' if skipped else '')
+    return ('\n\n---\n\n'.join(out)
+            + '\n\n> 以上是本章的**工艺卡**（一页一主题）。'
+              '它们取代了"读若干本指南"——**本章不需要再读 guides**；'
+              '只有改写深查时按 `guide-index.md` 取一节。'
+            + note)
+
+
+def _is_rewrite_hint(seg: str) -> bool:
+    """粗判本章是不是"改写任务"（细纲里常见的标记）。"""
+    return bool(re.search(r'改写|重写|返工', seg or ''))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 思考协议（2026-11-01 v10.0）
+# ──────────────────────────────────────────────────────────────────────
+# **它修的是什么**：本体系此前 54 本 guides / 10 张卡 / 22 个脚本，
+# **没有任何一行管思维链**——全部工程都压在**输出面**（句长、密度、次数、改写）。
+#
+# 而 AI 味是在正文**之前**定下的：模型的自我审查发生在思维链里，
+# 而 `architecture.md` §7.2 ③ 那条"禁止自评"只挡在正文之后（"写完直接交"）——
+# **闸门设在了一道已经流过去的下游**。这是本体系最贵的一处结构性错位。
+#
+# **为什么必须放在 brief 的最后**（位置就是机制）：
+#   模型读完 brief 立刻开始思考 → **最后一行 = 第一个思考动作**。
+#   所以它不是"再强调一遍要求"，而是**给思维链设起手式**：
+#   第一件事必须是"这一章我不写 ___"（一次减法），而不是"嗯，我需要写……"（一次复述）。
+#
+# **为什么不在 SLOTS 里**：SLOTS 的顺序是"显著性设计"（硬约束→参考→正向素材），
+#   而这一段的作用域是**整条思维链**，它必须晚于渲染尾部的三条开写指令才生效。
+#   做成槽位会被后面的尾巴盖住 → **放在 render() 的最末尾**。
+#
+# **为什么读卡而不是内联字符串**：`cards/card-thinking.md` 是**唯一事实源**
+#   （写手读的那一份）；内联一份字符串 = 双载体，必漂（本项目已在配额卡上踩过）。
+def _thinking_card() -> str:
+    """把 `cards/card-thinking.md` 原文接到 brief 最末尾（给思维链设起手式）。"""
+    p = Path(__file__).resolve().parent.parent / 'references' / 'cards' / 'card-thinking.md'
+    if not p.is_file():
+        # ★ 不 fail-closed：卡缺失时 brief 仍然可写（否则整个编译器被一张卡拖死）。
+        #   但**必须留痕**——静默少一段 = "看起来配了、其实没有"，本项目最忌讳的那一类。
+        return ('# 现在开始想（动笔之前）\n\n'
+                '> ⚠️ **思考协议卡缺失**（`references/cards/card-thinking.md` 找不到）——'
+                '本次按老办法写：不动笔前先定"不写什么"，思考里不做自评。\n')
+    lines = read_text(p).strip().split('\n')
+    # 卡自己的 H1 是"一页卡"的标题（"这一页…"），内联进 brief 后语义不通 →
+    # 换成 brief 语境下的标题，其余原样（**不做任何改写**，单一事实源仍在那张卡里）。
+    if lines and lines[0].startswith('# '):
+        lines = lines[1:]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return ('# 现在开始想（动笔之前：这一节定的是你思考里做什么，不是正文写什么）\n\n'
+            + '\n'.join(lines))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 人类范本自动选段（2026-10-26 v9.1）
+#
+# **它修的是什么**：`human_exemplar` 此前是**主编手填的 TODO**，而它有官方逃生口径
+# （"本章无适配的范本时刻"）。实测后果可以预见：**最强的那根杠杆在实际项目里多半是空的**
+# —— "给写手一段真人原文"变成了"给写手一句解释为什么没给"。
+# 而按模型机制（放什么检索什么），**真人原文是唯一能真正改变语域的东西**，
+# 它比任何一条指令都强。**把最强的杠杆做成"可选"，就是把它做成"没有"。**
+#
+# 选段规则（按章型；改这里 = 改规则，不在文档里另存一份）：
+#   · 静场/日常 → 纯闲笔 / 章末平静 / 小动作代替情绪 / 现实锚定
+#   · 打斗/冲突 → 群体噪音 / 生理写实 / 降格幽默
+#   · 对话为主   → 对话的不完美 / 称呼即关系刻度
+#   · 情绪/失去  → 故意不解释 / 自由间接引语 / 生理写实
+#   · 默认       → 叙述者跳出来 / 故意不解释
+# 每类取 **2 节**，每节取**最长的一段**（材料越多越能带起语域），裁到 ≈480 字（句末）。
+# ──────────────────────────────────────────────────────────────────────
+_EXEMPLAR_RULES = [
+    (r'静场|日常|过场|生活', ['纯闲笔', '章末的', '小动作代替情绪', '现实锚定']),
+    (r'打斗|追击|战斗|厮杀|冲突|对峙|围杀', ['群体噪音', '生理写实', '降格幽默']),
+    (r'对话|谈判|争吵|说服|交涉', ['对话的不完美', '称呼即关系刻度']),
+    (r'情绪|告别|死亡|失去|葬礼|离别|崩溃', ['故意不解释', '自由间接引语', '生理写实']),
+]
+_EXEMPLAR_DEFAULT = ['叙述者跳出来', '故意不解释']
+
+
+def _trim_at_sentence(t: str, n: int) -> str:
+    if len(t) <= n:
+        return t
+    seg = t[:int(n * 1.15)]
+    idx = max(seg.rfind(m) for m in '。！？…')
+    return seg[:idx + 1] if idx >= n * 0.5 else seg
+
+
+def _human_exemplar_auto(proj: Path, chapter_no: int, ol_seg: str = '') -> str:
+    """按章型从 `human-exemplars.md` 自动挑 2 段真人原文（带来源标注）。"""
+    he = Path(__file__).resolve().parent.parent / 'references' / 'guides' / 'human-exemplars.md'
+    if not he.is_file():
+        return f'{TODO}：找不到 references/guides/human-exemplars.md】'
+    sections = parse_exemplar_sections(read_text(he))
+    if not sections:
+        return f'{TODO}：human-exemplars.md 解析不出任何片段（解析契约见 _shared）】'
+
+    want = _EXEMPLAR_DEFAULT
+    seg = ol_seg or ''
+    for rx, keys in _EXEMPLAR_RULES:
+        if re.search(rx, seg):
+            want = keys
+            break
+
+    picked, used = [], set()
+
+    def _take(title, pairs):
+        """从一节里取材料：够长就取一段，太短就把同节最长的两段并起来。
+
+        ⚠️ 为什么要并：本库多数片段只有 50–80 字（一句话的例），而**语感需要足够的字数才带得起来**
+        （300 字以下基本只能示范"一个动作"，带不动整段语域）。
+        同节的 2 例是**同一个技法的两个例子**，并起来不违和，反而更能说明"这一招长什么样"。
+        """
+        ranked = sorted(pairs, key=lambda x: -len(x[1]))
+        book, text = ranked[0]
+        if len(text) >= 200 or len(ranked) < 2:
+            return book, _trim_at_sentence(text, 480)
+        book2, text2 = ranked[1]
+        joined = text + '\n\n' + text2
+        src = book if book == book2 else f'{book}／{book2}'
+        return src, _trim_at_sentence(joined, 480)
+
+    for key in want:                       # 先按章型命中
+        for title, pairs in sections:
+            if key in title and title not in used and pairs:
+                used.add(title)
+                picked.append((title, *_take(title, pairs)))
+                break
+        if len(picked) == 2:
+            break
+    if len(picked) < 2:                    # 不够就按"有片段的节"顺序补齐
+        for title, pairs in sections:
+            if len(picked) == 2:
+                break
+            if title in used:
+                continue
+            used.add(title)
+            picked.append((title, *_take(title, pairs)))
+
+    if not picked:
+        return f'{TODO}：human-exemplars.md 里没有可用片段】'
+    out = ['本章真人范本（**给原文，不给规则**——照着它的语感写，不是照着它的事件写）：']
+    for title, book, text in picked:
+        out.append(f'\n【来源：{book} · {title}】')
+        out.append(text)
+    out.append('\n> 用法：**读一遍，然后写第一句**。不要模仿它的事件，模仿它「哪里不干净」——'
+               '多出来的那半句、说漏的那个称呼、没解释的那件事。')
+    return '\n'.join(out)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 四个"人工格"的自动填充（2026-10-26 v9.2）——**批量自动化的前提**
+#
+# **为什么必须自动化**：`ledger` / `world_pack` / `lesions` / `author_shot` 此前
+# 每章要人填 4 次。这意味着"批量写 10 章"要么花 40 次人工介入，要么这四格一直是空的。
+# **一个需要人工介入 40 次/10 章的流程，不可能被称为自动化。**
+#
+# **为什么以前坚持"人填"**：定位是"需要理解才能产生"。这句话是对的，
+# 但它推出的是"**人判断得更好**"，不是"**没有人就必须空着**"。
+# 而当"空着"是唯一替代品时，实际发生的往往是第三种结果：**填空话**
+# （"本章无适配的范本时刻"）。本项目已在这个模式上栽过一次（`human_exemplar`）。
+# → 修法：**脚本给出一个可用的近似值，并标注「可覆盖」**。
+#   主编不满意就改一行；没时间改，也不至于空着。
+#
+# ⚠️ 抽不到就返回 TODO（fail-closed），**不许编**：
+#   判据 = 这一段里每一个事实，都必须能在项目文件里指出来源行。
+# ──────────────────────────────────────────────────────────────────────
+
+# 缺陷类型 → 占位式指令（"这里要放什么"，不是"不要写 X"）
+# 这张表是 `lesions` 自动生成的引擎，也是**体系从自己的缺陷里学**的那一环：
+# 上一批栽在哪一类，下一批就把"该放什么"提前写进 brief。
+_LESION_RECIPES = {
+    '字数': '这里要放一段**具体的过程**——一个动作从开始到结束（谁动手、怎么动、手感到什么、结果如何），不要概括成一句',
+    '节律': '这里要放**一句把整个处境装进去的长句**（谁+状态→动作→手段→结果→推论），它前面留短句呼吸',
+    '词汇': '这里要放**一个只有这个人物会说的词**（口头禅、方言词、他的行话），不是"他很愤怒"',
+    '重复': '这一段**换一个入口**：上一章是从时间/环境起手的，这一章从人物、物或一句对话起手',
+    '连续性': '这里要放**一句把上一章末那个动作接住的话**（他手上还留着什么、身上还疼在哪）',
+    '世界': '这里要放**一条只有这个世界才有的规矩或物**（专名表里的词，不许另造同义新词）',
+    '契约': '这里要放**一句交代他此刻在哪、知道什么、身上什么状况**（读者要能自己接上）',
+    '故事': '这里要放**一个他真的失去的东西**（已经发生，不是"他很难过"）',
+    '承诺': '这里要放**一件读者会记着、但这一章不解答的事**（写完登记进承诺账）',
+}
+
+
+def _ledger_auto(proj: Path, chapter_no: int, ol_seg: str = '') -> str:
+    """从 `03-状态台账.md` 的「人物状态」表里抽本章出场人物条目。
+
+    匹配方式：台账「角色」列的名字**出现在本章细纲文本里** → 认为他出场。
+    宁窄不宽：抽不到就走兜底并**显式声明是兜底**（"抽错了人"比"没抽"更坏——
+    写手会照着错的状态写）。
+    """
+    f = proj / '03-状态台账.md'
+    if not f.is_file():
+        return f'{TODO}：找不到 03-状态台账.md】'
+    txt = read_text(f)
+    m = re.search(r'(?m)^##\s*人物状态[^\n]*$', txt)
+    if not m:
+        return f'{TODO}：03-状态台账.md 里没有「## 人物状态」段】'
+    rest = txt[m.end():]
+    nxt = re.search(r'(?m)^##\s', rest)
+    body = rest[:nxt.start()] if nxt else rest
+
+    rows, header = [], []
+    for line in body.split('\n'):
+        s = line.strip()
+        if not s.startswith('|') or set(s) <= set('|-: '):
+            continue
+        cells = [c.strip() for c in s.strip('|').split('|')]
+        if not header:
+            header = cells
+            continue
+        if cells and cells[0]:
+            rows.append(cells)
+    if not rows:
+        return f'{TODO}：03-状态台账.md 的「人物状态」表还没有数据行】'
+
+    seg = ol_seg or ''
+    hit = [r for r in rows if r[0] and r[0] in seg]
+    note = ''
+    if not hit:
+        hit = rows[:6]
+        note = ('\n\n> ⚠️ 本章细纲里没有出现台账中的角色名 —— 以上是**全表前 6 行**（兜底）。'
+                '若本章真正出场的人不在这里，请补细纲的「人物状态追踪」，不要手动改这一段。')
+    cols = header[:6] if header else ['角色', '位置', '情绪', '关系', '已知信息', '身体状态']
+    out = ['本章出场人物（**起点状态**；写作时从这里开始，写完结账回 `03-状态台账`）：']
+    for r in hit:
+        kv = [f'{cols[i]}={r[i]}' for i in range(min(len(cols), len(r))) if r[i] and r[i] != '—']
+        out.append('· ' + '｜'.join(kv))
+    return '\n'.join(out) + note
+
+
+def _world_pack_auto(proj: Path, chapter_no: int, ol_seg: str = '') -> str:
+    """从圣经「一、世界观手册」裁出本章要用的 500–800 字切片。
+
+    三样，按信息密度取（不按章节顺序）：**专有名词表**（最硬）→ **底层规则** → **场景卡**。
+    场景卡优先取"名字出现在本章细纲里"的行（本章真的要用到）。
+    """
+    bible, txt = _find_bible(proj)
+    if bible is None:
+        return f'{TODO}：找不到故事圣经（00-故事圣经.md）】'
+    m = re.search(r'(?m)^##\s*一、世界观手册[^\n]*$', txt)
+    body = txt[m.end():] if m else txt
+    nxt = re.search(r'(?m)^##\s*二、', body)
+    body = body[:nxt.start()] if nxt else body
+
+    parts, total = [], 0
+
+    def _sec(head_rx, cap):
+        nonlocal total
+        mm = re.search(head_rx, body, re.M)
+        if not mm:
+            return
+        rest = body[mm.end():]
+        nn = re.search(r'(?m)^###\s', rest)
+        seg = (rest[:nn.start()] if nn else rest).strip()
+        lines = [l for l in seg.split('\n') if l.strip() and not l.strip().startswith('>')]
+        seg = '\n'.join(lines)[:cap]
+        if seg:
+            parts.append(seg)
+            total += len(seg)
+
+    _sec(r'(?m)^###\s*7\.\s*专有名词表[^\n]*$', 420)      # 最硬：只用表内的词
+    if total < 700:
+        _sec(r'(?m)^###\s*2\.\s*底层规则[^\n]*$', 320)
+    if total < 700:
+        mm = re.search(r'(?m)^###\s*4\.\s*地图与场景卡[^\n]*$', body)
+        if mm:
+            rest = body[mm.end():]
+            nn = re.search(r'(?m)^###\s', rest)
+            seg = rest[:nn.start()] if nn else rest
+            rows = [l.strip() for l in seg.split('\n') if l.strip().startswith('|')]
+            keyed = [l for l in rows if any(k in ol_seg for k in re.findall(r'[\u4e00-\u9fff]{2,6}', l))]
+            pick = keyed or rows
+            if pick:
+                t = '\n'.join(pick)[:260]
+                parts.append(t)
+                total += len(t)
+
+    if not parts:
+        return (f'{TODO}：圣经「一、世界观手册」里抽不出可用切片'
+                f'（专有名词表/底层规则/场景卡都空着）】')
+    return ('本章世界切片（**是约束不是参考**：表里已有名字的东西禁止另造同义新词；'
+            '要造新词必须在回报里单列 `新增专名：`）：\n\n' + '\n\n'.join(parts))
+
+
+def _lesions_auto(proj: Path, chapter_no: int) -> str:
+    """从 `06-章节工单.md` 的**缺陷帕累托**自动生成 1–2 条占位式指令。
+
+    这是"**体系从自己的缺陷里学**"的那一环：上一批栽在哪一类，这一批就把"该放什么"
+    提前写进 brief（**前馈 > 反馈**——反馈要多写一轮、要多花 15 万 token；前馈只要几行字）。
+    """
+    f = proj / '06-章节工单.md'
+    if not f.is_file():
+        return '无（本批尚无工单记录——第一批没有历史病灶可前馈）'
+    txt = read_text(f)
+    idx_defect, count = None, {}
+    for line in txt.split('\n'):
+        s = line.strip()
+        if not s.startswith('|') or set(s) <= set('|-: '):
+            continue
+        cells = [c.strip() for c in s.strip('|').split('|')]
+        if '缺陷类型' in cells:
+            idx_defect = cells.index('缺陷类型')
+            continue
+        if idx_defect is None or idx_defect >= len(cells):
+            continue
+        for t in re.split(r'[、,，/｜| ]+', cells[idx_defect]):
+            t = t.strip()
+            if t and t not in ('—', '无', '-'):
+                count[t] = count.get(t, 0) + 1
+    if not count:
+        return '无（工单里还没有缺陷记录）'
+    top = sorted(count.items(), key=lambda x: -x[1])[:2]
+    lines = [f'本批已出现过的病灶（按频次取前 {len(top)} 类；'
+             f'下面是"这里该放什么"，不是"不要写什么"）：']
+    for name, n in top:
+        recipe = _LESION_RECIPES.get(name)
+        if recipe:
+            lines.append(f'· **{name}**（{n} 章）→ {recipe}')
+    if len(lines) == 1:
+        return '无（工单里的缺陷类型都不在已知映射表里）'
+    lines.append('\n> 判据：这几条是**前馈**（上一批的账，这一批提前还），不是本章的验收项。')
+    return '\n'.join(lines)
+
+
+def _author_shot_auto(proj: Path, chapter_no: int) -> str:
+    """从 `07-剧情脚手架.md` 抽本章的「作者脑中的画面」+「读者情绪目标」。
+
+    抽不到时给**显式的一句**而不是 TODO：因为"作者没投喂画面"是**合法状态**
+    （`plot-scaffold.md`：问过就算过，作者说没有也不阻塞）。
+    把它变成编译阻塞 = 把合规流程卡死。
+    """
+    f = proj / '07-剧情脚手架.md'
+    if not f.is_file():
+        return ('本章无脚手架条目（作者尚未投喂画面）——**这不是缺陷**。'
+                '但如果你手边有一个具体画面，现在给：它是整条流水线上最保人味的素材。')
+    txt = read_text(f)
+    blocks = re.split(r'(?m)^###\s+', txt)
+    for b in blocks[1:]:
+        head = b.split('\n', 1)[0]
+        if '第' not in head:
+            continue
+        hit = False
+        for a, bb in re.findall(r'第\s*(\d{1,4})\s*(?:[–\-~至]\s*(\d{1,4}))?\s*章', head):
+            lo = int(a)
+            hi = int(bb) if bb else lo
+            if lo <= chapter_no <= hi:
+                hit = True
+                break
+        if not hit:
+            continue
+        shot = re.search(r'\*\*作者脑中的画面\*\*\s*[:：]\s*(.+)', b)
+        mood = re.search(r'\*\*读者情绪目标\*\*\s*[:：]\s*(.+)', b)
+        if not shot:
+            continue
+        out = ['作者画面（**原样保留，不要改写、不要解释**——那是作者自己的眼睛）：',
+               shot.group(1).strip()]
+        if mood:
+            out.append(f'\n读者情绪目标：{mood.group(1).strip()}　'
+                       f'（它决定这段怎么收束——目标若是"赢了但高兴不起来"，'
+                       f'就**不能用爽文的收束方式**）')
+        return '\n'.join(out)
+    return '本章无脚手架条目（本书脚手架里没有覆盖本章的条目）——**这不是缺陷**，照写即可。'
+
+
+# 加法菜单的自动选招（按章型）——治"这一格是主编手填，批量时必然空着"
+_ADDITIVE_RECIPES = [
+    (r'静场|日常|过场', [
+        ('一件没人要的物件', '给它一个来历（谁留下的、为什么还在），但**别让人物评论它**'),
+        ('一段无人的环境', '只写 2–3 句，且要有人刚刚离开的痕迹（椅子还热、灯还亮着）'),
+        ('一次没有后果的动作', '他做了，没人看见，故事不受影响——**这就是它存在的理由**'),
+    ]),
+    (r'打斗|追击|战斗|冲突|对峙', [
+        ('主角判断错一次', '让他根据经验推断，而推断是错的——**代价当场发生**'),
+        ('对手做对了一件事', '对手赢了一小步，主角因此改了计划'),
+        ('赢的代价', '赢了之后立刻付一样东西（钱、信誉、一个地方）'),
+    ]),
+    (r'对话|谈判|争吵|说服', [
+        ('一处打断', '话说到一半被别人截走，被打断的那半句不再补'),
+        ('一处答非所问', '问"你去哪了"，答"你吃饭了吗"'),
+        ('一次称呼改口', '关系变了就改称呼，别改解释（"陈总"→"汉升"）'),
+    ]),
+]
+_ADDITIVE_DEFAULT = [
+    ('一处不解释', '他知道了但没说 / 角色不知道 / 作者故意跳过'),
+    ('一件没用的东西', '对情节零贡献的物（冰箱里过期的酸奶、扣着的半杯凉水）'),
+    ('一次不完美的对话', '结巴／改口／说到一半被打断——**至少一处必须是主角说的**'),
+]
+
+
+def _additive_menu_auto(ol_seg: str = '') -> str:
+    """按章型选 3 招加法（**这是"往里加什么"，不是"改成什么样"**）。
+
+    ⚠️ 它和 `craft_cards` 有重叠（`card-prose` 第三节也讲具体性），这是**有意的冗余**：
+    卡讲"怎么抓具体"，这里讲"这一章具体该加哪三样"。**一个给方法，一个给清单。**
+    """
+    picks = _ADDITIVE_DEFAULT
+    for rx, items in _ADDITIVE_RECIPES:
+        if re.search(rx, ol_seg or ''):
+            picks = items
+            break
+    out = ['本章挑这 3 招加法（**挑 3 招，不要逐条打卡**——逐条打卡＝同构模板）：']
+    for name, how in picks:
+        out.append(f'· **{name}**：{how}')
+    out.append('\n> 判据：这三招都是**加法**（往里放东西），删不出来。'
+               '它们的上限是"到处都在用力"——**三项做到就是够，做满反而像 AI**。')
+    return '\n'.join(out)
+
+
+_BOB_KEYS = ('缺闲笔', '章末落笔', '对白声口', '本体层具体性', '叙述者立场')
+
+
+def _best_of_book_auto(proj: Path, chapter_no: int, ol_seg: str = '') -> str:
+    """从 `细纲/_最佳段落库.md` 按本章病灶类型挑 1–2 段（**本书自己的好段落**）。
+
+    与 `human_exemplar` 的分工不变：那是**外部**人类范本（拉开距离），
+    这是**本书**的已定稿好段落（更贴近"这一本的味道"，零采集成本）。
+    抽不到时给**显式说明**而不是 TODO：第一批本来就没有已定稿章可挑，那是时序，不是缺失。
+    """
+    f = proj / '细纲' / '_最佳段落库.md'
+    if not f.is_file():
+        return '（本书尚无 `细纲/_最佳段落库.md`——第一批属正常，批末 7.7 会建。）'
+    txt = read_text(f)
+    seg = ol_seg or ''
+    if re.search(r'静场|日常', seg):
+        want = ['缺闲笔', '叙述者立场']
+    elif re.search(r'打斗|冲突|对峙', seg):
+        want = ['章末落笔', '本体层具体性']
+    else:
+        want = ['章末落笔', '缺闲笔']
+
+    blocks = {}
+    for m in re.finditer(r'(?m)^#{2,4}\s*([^\n]+)$', txt):
+        key = next((k for k in _BOB_KEYS if k in m.group(1)), None)
+        if not key:
+            continue
+        rest = txt[m.end():]
+        nxt = re.search(r'(?m)^#{2,4}\s', rest)
+        blocks[key] = (rest[:nxt.start()] if nxt else rest).strip()
+
+    out = []
+    for k in want:
+        if blocks.get(k):
+            body = re.sub(r'(?m)^>\s*', '', blocks[k]).strip()
+            out.append(f'【本书取样 · {k}】\n{body[:600]}')
+        if len(out) == 2:
+            break
+    if not out:
+        keys = '／'.join(blocks) if blocks else '（空）'
+        return f'（`_最佳段落库.md` 里没有本章需要的分类。现有分类键：{keys}。）'
+    return ('本书已定稿的好段落（**照着它的样子写**——不是照着指标写）：\n\n'
+            + '\n\n'.join(out))
+
+
+def _batch_global_auto(proj: Path, chapter_no: int, ol_chaps: dict) -> str:
+    """批次全局三件套：细纲有就用细纲，没有就**从圣经与上一章正文自动拼**。
+
+    ★ 为什么必须自动：这一格是 `editor`，而**批量写 10 章时没人会填 10 次**。
+      而且它更好的部分是：**锚点示例本来就该是一段真实原文**——手抄会漂，脚本抽不会。
+    """
+    seg = ol_chaps.get(chapter_no, '')
+    g = _section(seg, '批次全局', ('文风基因', '锚点示例', '句法'))
+    if g:
+        return g
+
+    parts = []
+    bible = _find_bible(proj)[1]
+    if bible:
+        m = re.search(r'(?m)^###\s*叙述者人格[^\n]*$', bible)
+        if m:
+            rest = bible[m.end():]
+            nxt = re.search(r'(?m)^###\s', rest)
+            seg2 = (rest[:nxt.start()] if nxt else rest).strip()
+            if seg2:
+                parts.append('**文风基因（本书口吻宪法的人格四格）**\n' + seg2[:400])
+    prev = None
+    for f in find_chapter_files(proj):
+        mm = _PKG_CHAPTER.search(Path(f).name)
+        if mm and int(mm.group(1)) == chapter_no - 1:
+            prev = Path(f)
+            break
+    if prev is not None:
+        try:
+            body = _paras(read_text(prev))
+            anchor = next((p for p in body if 150 <= len(p) <= 400), None) or _tail(body, 300)
+            if anchor:
+                parts.append(f'**锚点示例（第 {chapter_no - 1} 章正文原样摘录，一个字没改）**\n{anchor}')
+        except Exception:
+            pass
+    if not parts:
+        return f'{TODO}：细纲没有「批次全局信息」段，且圣经/上一章正文也抽不出锚点】'
+    parts.append('**句法基线**：不列数字。看本 brief 末尾那三条开写指令——'
+                 '它们在讲形态，不是在讲阈值。')
+    return '\n\n'.join(parts)
+
+
 def _word_target(proj: Path) -> str:
     for n in ('02-写作计划.json', '写作计划.json'):
         p = proj / n
@@ -596,7 +1399,7 @@ def build(proj: Path, chapter_no: int, rewrite: bool = False):
 
     # ① 批次全局三件套（只抠该给的三样）
     g = _section(ol_text, '批次全局', ('文风基因', '锚点示例', '句法'))
-    fills['batch_global'] = g or f'{TODO}：细纲里没有「批次全局信息」段（文风基因/锚点示例/句法基线）】'
+    fills['batch_global'] = _batch_global_auto(proj, chapter_no, ol_chaps)
 
     # ② 接口契约（本章）
     c = parse_contract(ol_chaps.get(chapter_no, ''))
@@ -610,6 +1413,15 @@ def build(proj: Path, chapter_no: int, rewrite: bool = False):
         fills['contract'] = (f'{TODO}：细纲第 {chapter_no} 章没有「接口契约」块】\n'
                              f'格式见 phase2-planning.md 细纲规格；跑 '
                              f'`check_contract.py <项目>` 可查')
+
+    # ②c v9.0 的两个新硬约束：**读者在等什么** + **这一章该发生什么**
+    #    这两个都在"怎么写"之前 —— 位置邻近 `contract` 是按显著性设计的：
+    #    负向/硬约束在前，正向素材在后。
+    fills['promise_debt'] = _promise_debt(proj, chapter_no)
+    fills['story_ledger'] = _story_ledger(proj, chapter_no)
+    # ★ v11.0：后果链（L1 第二根轴）。抽不到 → TODO → `--check` 拒绝开工，
+    #   与 story_ledger / concrete_list 同一个既定模式（"记得填"变成"编译不过"）。
+    fills['consequence_chain'] = _consequence_chain(proj, chapter_no)
 
     # ②b 本批已用过的开场 / 章末型 —— **前馈：给事实，不给目标**
     #     「跨章同质」现在是"写完由 check_repetition 报警"，属于反馈（= 多一轮 × 15万 token）。
@@ -657,31 +1469,21 @@ def build(proj: Path, chapter_no: int, rewrite: bool = False):
     fills['meta'] = (f'章号 {chapter_no}（{"奇数" if chapter_no % 2 else "偶数"}）｜'
                      f'{_word_target(proj)}')
 
-    # ⑤ 需要理解才能产生的 —— 显式留空，**不假装脚本能写**
-    fills['ledger'] = f'{TODO}：从 03-状态台账.md 抄本章出场人物条目（每条带三态 ✓/?/✗）】'
-    fills['world_pack'] = f'{TODO}：按本章裁剪 500–800 字（读圣经「世界观手册」）】'
-    # ★ 修复：这三个此前**被赋空串 + required=False**，于是 render() 静默跳过、
-    #   check_one() 也静默通过 —— 实测生成物里它们出现 **0 次**。
-    #   现在：`author_shot` 与 `lesions` 改为必填（给 TODO 标记，主编看得见、校验拦得住）；
-    #   `diagnosis` 只在 `--rewrite` 时产出（新写任务里它本来就不适用）。
-    fills['author_shot'] = (f'{TODO}：从 07-剧情脚手架.md 原样抄作者本人的原话画面】'
-                            '（若本章脚手架确无条目，写「本章无脚手架条目」——'
-                            '但**不要留空**：它是"最保人味的素材"）')
+    # ⑤ 需要理解才能产生的 —— **v9.2 起改为"脚本给近似值 + 标注可覆盖"**
+    #    这四格是批量自动化的最大障碍（每章 4 次人工介入）× 10 章 = 40 次，
+    #    那就不是自动化。脚本抽得到就抽，抽不到才 TODO（fail-closed）。
+    fills['ledger'] = _ledger_auto(proj, chapter_no, ol_chaps.get(chapter_no, ''))
+    fills['world_pack'] = _world_pack_auto(proj, chapter_no, ol_chaps.get(chapter_no, ''))
+    fills['author_shot'] = _author_shot_auto(proj, chapter_no)
     # ★ 实物清单（v7.0.0）：脚本可自填——从本章的 `_meta` 文件抽，**不用主编手抄**。
     #   抽不到 → TODO → `--check` 拦住（本体层无脚本判据，只能靠编译期强制）。
     fills['concrete_list'] = _concrete_list(proj, chapter_no)
     # ★ 加法层两槽（2026-10-09）：**脚本拿不到**（"按本章偏低的项挑哪几招""按'时刻'挑哪
     #   1–2 段范本"都是判断，不是抽取）→ 给 TODO 标记，由 `--check` 拦住未填的包。
     #   与 `lesions` / `author_shot` 同一个既定模式：**把"记得填"变成"编译不过"**。
-    fills['additive_menu'] = (
-        f'{TODO}：按本章**偏低的项**挑 3–5 招加法（不是逐条打卡——逐条打卡＝同构模板）。'
-        '候选见速查卡【六】内容注入 / subagent-brief §15：私人细节 / 情绪体感化 / '
-        '主角犯错 / 句式随情绪变 / 道具非功能化】')
-    fills['human_exemplar'] = (
-        f'{TODO}：按"时刻"从 references/guides/human-exemplars.md 选 1–2 段，**抄原文**'
-        '（**给原文不给路径**——模型放什么就检索什么）。'
-        '本章确无适配时刻时写「本章无适配的范本时刻（已查 human-exemplars 目录）」——'
-        '但**不要留空**】')
+    fills['additive_menu'] = _additive_menu_auto(ol_chaps.get(chapter_no, ''))
+    fills['human_exemplar'] = _human_exemplar_auto(proj, chapter_no,
+                                                   ol_chaps.get(chapter_no, ''))
     # ★ 本书最佳段落（v7.2.0）：**"挑哪几段"是判断不是抽取** → 与加法层两槽同一模式。
     #   治的是"**改写目标是指标，不是样例**"：给 Agent 一个**文本级的参照**（"长成这一段
     #   这个样子"），而不是一串可凑的指标区间（"把句长提到 23"）。
@@ -689,17 +1491,9 @@ def build(proj: Path, chapter_no: int, rewrite: bool = False):
     #   这是**本书自己的**已定稿好段落（更贴近"这一本的味道"，且**零采集成本**）。
     #   ⚠️ 分类键 `缺闲笔`/`章末落笔`/`对白声口`/`本体层具体性`/`叙述者立场` 是**逐字
     #     接口契约**（跨 agent 共享），写进提示里是为了让主编**按缺陷类型**挑，不是随手抄一段。
-    fills['best_of_book'] = (
-        f'{TODO}：从 `细纲/_最佳段落库.md` 按**本章病灶的类型**挑 1–2 段，**抄原文**'
-        '（分类键：缺闲笔 / 章末落笔 / 对白声口 / 本体层具体性 / 叙述者立场）。'
-        '**给原文不给路径**——它是"本书自己的好段落"，比"把句长提到 23"这种指标更能'
-        '定住"这一本的味道"。**改之前先读它，照着它的样子改**（单元与边界见 '
-        'references/guides/rewrite-units.md）。'
-        '尚无已定稿章可挑时，写显式说明（例：「本章是全书写完前的第 1 章，'
-        '尚无已定稿章可挑样例」）——但**不要留空**】')
-    fills['lesions'] = (f'{TODO}：本批真正出现过的 1–2 条病灶，**配占位式指令**'
-                        '（"这里要放一个具体的东西"而不是"不要写泛泛的感慨"）；'
-                        '没有则写「无」】')
+    fills['best_of_book'] = _best_of_book_auto(proj, chapter_no,
+                                               ol_chaps.get(chapter_no, ''))
+    fills['lesions'] = _lesions_auto(proj, chapter_no)
     fills['diagnosis'] = (f'{TODO}：诊断：{{一句话}} / 本稿必须不再犯：{{一句话}}】'
                           if rewrite else '')
     # ★ fix_recipe（2026-10-21）：按工单的缺陷类型抽 rewrite-playbook 对应节的核心配方。
@@ -712,6 +1506,9 @@ def build(proj: Path, chapter_no: int, rewrite: bool = False):
     #   抽不到 → TODO → `--check` 拦住（口吻宪法没有脚本能"补"出来的部分，
     #   只能靠编译期强制；见 `_voice_charter` 的说明）。
     fills['voice_charter'] = _voice_charter(proj)
+    # ★★★ v9.0：工艺卡（替掉"读指南"这个机制本身）。
+    #   挑卡规则全在 `_craft_cards()` 里（按章型换卡）——**不在文档里另存一份**。
+    fills['craft_cards'] = _craft_cards(proj, chapter_no, ol_chaps.get(chapter_no, ''))
     vp, lack = _voice_preset(ol_chaps, chapter_no)
     if lack and TODO not in vp:
         # 让问题在**编译时**就可见，而不是等 --check 才报
@@ -723,20 +1520,23 @@ def build(proj: Path, chapter_no: int, rewrite: bool = False):
 
 
 def render(proj: Path, chapter_no: int, fills: dict, rewrite: bool = False) -> str:
-    parts = [f'# 第 {chapter_no} 章 · 任务包（由 make_task_package.py 编译）',
+    # ══ 头部（v11.1 重写）════════════════════════════════════════════
+    # **砍掉了什么、为什么**（判据：删掉它，写手会不会变差？）
+    #   · 「总上限 12000 字」——写手管不了预算，那是编译期的事；
+    #   · 「校验：`--check ...`」——**这是给主编的命令**，写在包里会让写手以为要自己跑检查；
+    #   · 「槽位顺序是有意的 + 作用域从大到小」——那是**维护者**看的排序理由，
+    #     已完整写在 `SLOTS` 的注释里，不必每章重发一遍（每章重发 = 每章稀释一次）。
+    # 换成三行**类型导读**：它回答写手开工前唯一需要知道的元问题——
+    #   「这 23 段里，哪几段是要我动手的？」
+    _n_ok = sum(1 for k, *_ in SLOTS if slot_kind(k) == '已定')
+    _n_rest = len(SLOTS) - _n_ok
+    parts = [f'# 第 {chapter_no} 章 · 任务包（{"改写" if rewrite else "新写"}）',
              '',
-             f'> 本包由脚本编译：**脚本能拿到的已填好**，其余是**显式待填标记**。',
-             f'> 任务类型：**{"改写（诊断句必填）" if rewrite else "新写"}**'
-             f'｜预算上限：单槽位见标记，**总上限 {TOTAL_BUDGET} 字**。',
-             f'> 校验：`python scripts/make_task_package.py "{proj}" '
-             f'--check <本文件>`（缺槽位 / 超预算 / 待填残留 → 退出码 1，**拒绝开工**）',
-             '',
-             '> **槽位顺序是有意的**：开头放硬约束与"别犯什么"，'
-             '结尾放**"该怎么写"的正向具体素材**（**口吻宪法** / 配额卡 / 文风基因 / 声音预置 / '
-             '实物清单 / **加法菜单** / **范本原文** / **本书最佳段落** / 作者画面）——'
-             '长上下文上的检索是近似的，**不能靠"多给"取胜，只能靠"给对位置"**。\n'
-             '> 正向素材区内部再按**作用域从大到小**排：**口吻宪法管每一句**（全书常驻，'
-             '放在 `batch_global` 之前），其余只管这一章/这一批。',
+             f'> **本包 {len(SLOTS)} 段，只有最后一段要你动手。**',
+             f'> 〔已定〕{_n_ok} 段 = 已经定好的事实，**不许再议，照它写**；'
+             f'〔素材〕／〔红线〕{_n_rest} 段 = 给你用的，**不用逐条响应**。',
+             '> **没有〔产出〕标记的段落，都不是要你"检查"的项目。**'
+             '（清单越长执行率越低——本项目已实测过这一条）',
              '']
     for key, title, budget, req, who in SLOTS:
         # ★ 不再"空则跳过"：**所有槽位一律产出**。
@@ -745,12 +1545,61 @@ def render(proj: Path, chapter_no: int, fills: dict, rewrite: bool = False) -> s
         #   现在缺内容就写一句显式的"不适用"，使「槽位数 == SLOTS 数」恒成立。
         body = (fills.get(key, '') or '').strip() or '（不适用——本任务无此项）'
         parts.append(SLOT_OPEN.format(key=key, budget=budget, req=int(req)))
-        parts.append(f'## {title}')
+        # ★ v11.1：标题带类型前缀（见 `SLOT_KIND` 的说明）——
+        #   这是**权重分层**：让"已定"和"素材"在视觉与语义上都退到背景，
+        #   把显著性留给最后那一段"要你动手的"。
+        parts.append(f'## 〔{slot_kind(key)}〕{title}')
         parts.append('')
         parts.append(body)
         parts.append('')
         parts.append(SLOT_CLOSE.format(key=key))
         parts.append('')
+    # ★★★ 尾部（v11.1 重构）——**位置就是它的全部机制**。
+    #   为什么在最后：生成紧跟在最近的上下文之后；brief 有 1 万字，中段会被稀释
+    #   （lost-in-the-middle），**最后 500 字才决定它从哪里起步**。
+    #
+    #   三条旧的"开写指令"（回读声音样本 / 一句长句 / 不自评）**内容全部保留**，
+    #   只是从"三条并列"改成"三件事"（想／写／交）——因为写手真正要产出的就是这三样，
+    #   而此前它面对的是 51 个 `##` 标题，无法分辨哪一段是"动作"。
+    #
+    #   ★ 新增「一次豁免」（张力出口）：纯执行会让输出落到"安全且均匀"那一侧
+    #     （本项目的实测：配额只列"要补什么"，会让明喻 1.1→2.38、身体部位 0.5→1.19 —— 
+    #      **注意力是零和的，全都要 = 全都糊**）。给它**一次带理由的违反权**，
+    #     它就从"合规模式"切到"判断模式"；而理由本身是数据：
+    #     **连续三章豁免同一项 = 那条配额错了，该改卡。**
+    parts += [
+        '---',
+        '',
+        '## 现在开始写（只做三件事；上面每一段都不是清单）',
+        '',
+        '| # | 你要产出什么 | 靠什么 |',
+        '|---|---|---|',
+        '| **1 想** | 六格：删／眼／弃／留／开，＋ 一行「我放弃了」 | 下面那张卡 |',
+        '| **2 写** | 正文。**第一句照「口吻宪法 · 声音样本」起手**（不要先写天色、时间、天气）；'
+        '中后段要有一句**「读者会被按在水里」的长句**（一整个处境塞进去，中间不断） | 声音样本 · 实物清单 · 后果链 |',
+        '| **3 交** | 直接交。不自评、不回看指标、不盘它像不像 | —— |',
+        '',
+        '### 一次豁免（可选，本章最多一次）',
+        '',
+        '「配额卡」里的任何**一条**，这一章你都可以不遵守 —— 但交稿时要写清两件事：',
+        '**违反了哪一条**／**为什么这一章非这样不可**。不写 = 没有豁免，配额照常。',
+        '',
+        '> 豁免**不会被罚**。被罚的是「什么都不写，却什么都没做到」——那才是表演式合规。',
+        '> ⚠️ 豁免**只在配额卡范围内**：字数／硬性句式／后果链／三态标记**不在豁免范围**。',
+        '> 📌 连续三章豁免同一项 → 那不是你的问题，是**那条配额本身错了**，批末体检时改卡。',
+        '',
+        '> 三条都做到，比"每一条都做到"更像人写的——**人不会在所有地方同时用力**。',
+        '',
+    ]
+    # ★★★ v10.0「思考协议」——**必须是 brief 的最后一个字节**（见 `_thinking_card()` 的说明）。
+    #   brief 尾部三条管"怎么落笔"，这一段管"**思考里先做什么**"；
+    #   而思考发生在落笔之前 → **它的位置必须在三条之后**，否则起手式会被盖住。
+    parts += [
+        '---',
+        '',
+        _thinking_card(),
+        '',
+    ]
     return '\n'.join(parts)
 
 
@@ -802,9 +1651,33 @@ def check_one(path: Path, brief=False) -> int:
                              f'（实测真实项目 10 章里只有 3 章有这个段，且全都缺这三行）')
     if total > TOTAL_BUDGET:
         probs.append(f'**总包超预算**：{total} > {TOTAL_BUDGET} 字')
+
+    # ══ 分层自检（v11.1）════════════════════════════════════════════
+    # **为什么在 `--check` 里查，而不只写在 `audit_release` 里**：
+    #   audit 是**发布前**跑（改 SKILL 的人），`--check` 是**每章编译后**跑（写作的人）。
+    #   分层坏了，受害的是每一章的写手 —— 所以必须在**每章都过**的那道闸上查。
+    # 判据与 `_demote_headings` / `render()` 里的两处改动一一对应：
+    #   ① 每个槽位标题必须带类型标签（否则它就和"已定事实"混在一起）；
+    #   ② 标题总数不许显著多于槽位数（否则是**卡的子标题没降级** → 又变回 51 段）。
+    _n_tag = len(re.findall(r'(?m)^## 〔', text))
+    _n_head = len(re.findall(r'(?m)^## ', text))
+    if _n_tag < len(slots):
+        probs.append(f'**有 {len(slots) - _n_tag} 个槽位标题没带类型标签**'
+                     f'（〔已定〕／〔素材〕／〔红线〕）—— 标签是权重分层的唯一载体；'
+                     f'缺了它，写手会把这一段也当"要检查的项目"')
+    if _n_head > len(SLOTS) + 10:
+        probs.append(f'**标题数异常**：{_n_head} 个 `##`（槽位只有 {len(SLOTS)} 个）—— '
+                     f'多半是工艺卡的子标题**没降级**（`_demote_headings`），'
+                     f'写手又会看到"几十条要求"')
+
     if not brief:
         print(f'\n  {path.name}')
         print(f'    槽位 {len(slots)}/{len(SLOTS)}｜合计 {total} 字（上限 {TOTAL_BUDGET}）')
+        _kinds = {}
+        for k, *_ in SLOTS:
+            _kinds[slot_kind(k)] = _kinds.get(slot_kind(k), 0) + 1
+        print('    分层：' + '／'.join(f'〔{k}〕{v}' for k, v in _kinds.items())
+              + f'｜标题 {_n_head} 个｜**要写手动手的 1 段**（「现在开始写」）')
         if absent_opt:
             print(f'    ⚠ 缺可选槽位（不阻塞，但请确认是不是漏了）：'
                   f'{"、".join(absent_opt)}')
@@ -825,12 +1698,53 @@ def main():
     ap.add_argument('--brief', action='store_true', help='只输出问题（窗闸/批闸用）')
     ap.add_argument('--rewrite', action='store_true',
                     help='本任务是**改写**（产出 diagnosis 槽位；改写不带诊断句 = 重抽彩票）')
+    # ★ v9.2：批量预编译（**自动化的入口**）。
+    #   为什么单独一个开关：批量模式下 agent 不该"写一章、编一章"——
+    #   那会把编译等待和写作混在同一段上下文里，中途失败还要从头来。
+    #   正确形态：**先把 N 章的 brief 全编译好并逐个自检**，然后 agent 只需
+    #   "读 brief → 写"，一章接一章。详见 `guides/batch-mode.md`。
+    ap.add_argument('--batch', metavar='A-B',
+                    help='批量编译第 A–B 章（例：6-15）')
     args = ap.parse_args()
 
     proj = Path(args.project)
     if not proj.is_dir():
         print(f'[错误] 目录不存在：{args.project}')
         sys.exit(2)
+
+    if args.batch:
+        m = re.match(r'^\s*(\d{1,4})\s*[-–~至]\s*(\d{1,4})\s*$', args.batch)
+        if not m:
+            ap.error('--batch 的格式是 A-B（例：6-15）')
+        a, b = int(m.group(1)), int(m.group(2))
+        if b < a:
+            a, b = b, a
+        out = proj / PKG_DIR
+        out.mkdir(parents=True, exist_ok=True)
+        print('=' * 60)
+        print(f'批量预编译：第 {a}–{b} 章（共 {b - a + 1} 章）')
+        print('=' * 60)
+        bad = 0
+        for n in range(a, b + 1):
+            fills = build(proj, n, rewrite=args.rewrite)
+            text = render(proj, n, fills, rewrite=args.rewrite)
+            (out / f'第{n:02d}章-任务包.md').write_text(text, encoding='utf-8')
+            todo = [k for k, _t, _bb, r, w in SLOTS if r and TODO in fills.get(k, '')]
+            zs = _zishu(text)
+            over = zs > TOTAL_BUDGET
+            if todo or over:
+                bad += 1
+            flag = '✓' if not (todo or over) else '✗'
+            tail = (f'待填 {len(todo)}：{"、".join(todo[:4])}' if todo else '齐备')
+            if over:
+                tail += f'｜⚠ {zs} 字 > 上限 {TOTAL_BUDGET}'
+            print(f'  {flag} 第{n:02d}章  {zs:>5} 字  {tail}')
+        print('-' * 60)
+        if bad:
+            print(f'✗ {bad} 章未齐备 —— **先补齐再开写**（批量模式不跳过缺料的章）')
+            sys.exit(1)
+        print(f'✓ {b - a + 1} 章全部齐备 —— 可以按序开写（协议见 guides/batch-mode.md）')
+        sys.exit(0)
 
     if args.check is not None:
         targets = []

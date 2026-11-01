@@ -466,6 +466,82 @@ def meta_body_path(meta_path):
     return p.parent / (name + '.md')
 
 
+# ──────────────────────────────────────────────────────────────
+# 人类范本片段库解析（2026-10-26 v9.1 收归共享）
+# ──────────────────────────────────────────────────────────────
+# **为什么收归**：`human-exemplars.md` 的片段现在有**两个消费者**——
+#   ① `make_blindtest.py`：拿它当"真人类"对照组（盲测）；
+#   ② `make_task_package.py`：按章型挑 2 段内联进 brief（`human_exemplar` 槽位）。
+# 两个脚本各写一份解析器 = 本项目最忌讳的「双载体必漂」：
+# 一旦一处认"标题行后面直接跟正文"、另一处只认"正文在下一行"，两边抽到的片段就不一样，
+# 于是**盲测用的对照**和**写手看到的范本**不是同一批文本——而两处都不会报错。
+#
+# ⚠️ 真实排版**两种都有**（本库 20 段里两种混着写）：
+#     `> **原文（书名）**：` 换行后 `> 正文…`
+#     `> **原文（书名）**：正文直接跟在冒号后面…`
+# 所以必须逐行扫描：**标题行之后剩下的文字也算正文**。
+EXEMPLAR_HEAD_RX = re.compile(r'^>[ \t]*\*\*原文（([^\n]*?)）\*\*[ \t]*[：:]?[ \t]*(.*)$')
+SECTION_RX = re.compile(r'(?m)^##\s+(.+)$')
+# 面板／属性列表块不能当"语感范本"：它和散文的差别大到不用读手感（盲测与范本都排除）
+_PANEL_BLOCK_RX = re.compile(r'[【\[][^】\]]*[】\]]')
+
+
+def panel_ratio(t: str) -> float:
+    """括号内容占比。>0.3 = 面板/属性块，不能当散文范本或盲测材料。"""
+    inner = sum(len(m) for m in _PANEL_BLOCK_RX.findall(t))
+    return inner / max(1, len(t))
+
+
+def _scan_exemplar_pairs(body: str):
+    """从一段文本里逐行抽 `> **原文（书）**：…` 块。返回 [(出处, 正文)]。"""
+    out, book, buf = [], None, []
+    for line in body.split('\n'):
+        m = EXEMPLAR_HEAD_RX.match(line)
+        if m:
+            if book and buf:
+                out.append((book, ''.join(buf)))
+            book, buf = m.group(1).strip(), []
+            rest = m.group(2).strip()
+            if rest:
+                buf.append(rest)
+            continue
+        if book is not None:
+            if line.lstrip().startswith('>'):
+                buf.append(line.lstrip()[1:].strip())
+            else:
+                if buf:
+                    out.append((book, ''.join(buf)))
+                book, buf = None, []
+    if book and buf:
+        out.append((book, ''.join(buf)))
+    clean = []
+    for b, t in out:
+        t = t.replace('**', '').replace('*', '').strip()
+        if len(t) >= 40 and panel_ratio(t) < 0.3:
+            clean.append((b, t))
+    return clean
+
+
+def parse_exemplar_sections(text: str):
+    """把 `human-exemplars.md` 解析成 [(节标题, [(出处, 正文)])]。
+
+    **解析规则是跨 agent 的接口契约，不许改**：
+      · 节 = `## ` 标题行切分；
+      · 节内片段 = `> **原文（出处）**：`（正文可同行可下一行）。
+    返回的节标题**保留原编号与括号说明**（例：`三、叙述者故意不解释 / 坦白"角色不知道"`），
+    因为选段规则是按标题关键词匹配的（见 `make_task_package._pick_sections`）。
+    """
+    out = []
+    parts = SECTION_RX.split(text)
+    # parts = [前言, 标题1, 正文1, 标题2, 正文2, ...]
+    for i in range(1, len(parts) - 1, 2):
+        title, body = parts[i].strip(), parts[i + 1]
+        pairs = _scan_exemplar_pairs(body)
+        if pairs:
+            out.append((title, pairs))
+    return out
+
+
 if __name__ == '__main__':
     import sys, io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')

@@ -159,6 +159,34 @@ KEY_TOOLS = [
     'prompt-engineering', 'post-polish', 'low-cost-mode', 'nsfw-mode',
     '配额卡', '加法配额', '删除测试', '铁律九', '硬性句式',
     '现实锚定', 'costMode', 'contentMode',
+    # ── L1 故事层与盲测（2026-10-26 v8.0）────────────────────────────
+    #    为什么必须进这张表：本表是**唯一**能自动发现"写了但没人调"的机制。
+    #    这两个新件的处境正是本体系最典型的一种死法——**判据写好了、生成点建好了、
+    #    脚本也写了，但没有任何执行清单读它**（`意象配额` 就这样孤儿了很久）。
+    #    ≥2 处调用点 = 至少有一个"注册处"（guide-index / SKILL.md）和一个"触发处"（flows）。
+    '故事账', 'story-ledger', 'check_story', 'blind-test', 'make_blindtest',
+    # ── v9.0「编译取代阅读」+ 承诺账（2026-10-26）─────────────────────
+    #    这四个是本轮架构倒转的三个支点，同样必须 ≥2 处调用点：
+    #    `references/cards/` + `craft_cards` = 写手拿到"怎么写"的唯一来源（替掉读指南）；
+    #    `承诺账` + `check_promises` = 跨章连贯的唯一机械判据。
+    #    ⚠️ 它们的失效方式和别的不一样：**卡不在 → 编译器塞 TODO → --check 拒绝开工**（运行期能拦）；
+    #       但如果**没人提到它们**，就会退回"写手自己找指南读"——那时一条闸门都不会响。
+    'references/cards/', 'craft_cards', '承诺账', 'check_promises',
+    # ── v9.2：挑刺 + 批量（2026-10-26）──────────────────────────
+    'make_grill', 'batch-mode', '批量模式',
+    # ── v10.0：L0 思考层（2026-11-01）────────────────────────────
+    #    为什么必须进表：这一层是"**在正文之前生效**"的规则，它的失效方式和别的都不一样——
+    #    卡被删了 → 编译器塞一句警告后照常出包（**不 fail-closed，所以运行期不拦**）；
+    #    而"要不要在思考里做决定"这件事**任何脚本都测不出来**。
+    #    → **唯一的防线是"有地方写着它、且有地方触发它"**，正好是这张表能查的事。
+    'card-thinking', 'thinking-protocol', '决策五问', 'Reasoning Effort',
+    # ── v11.0：L1 纵轴·后果链（2026-11-01）──────────────────────
+    #   失效方式同上：卡改了、槽位改了，而**没有任何清单读它** → 五栏退化成"写完自己欣赏的一段推演"。
+    'consequence-chain', '后果链', '传递律',
+    # ── v11.1：素材与工序分离（2026-11-01）─────────────────────
+    #   失效方式：标签被删掉 → 23 段又变回「一样重的 23 条要求」→
+    #   写手把预算花在打勾上。**它不会报错，只会让「少而硬」悄悄失效。**
+    '一次豁免', '只做三件事', '〔已定〕',
 ]
 
 # ══════════════════════════════════════════════════════════════════
@@ -474,7 +502,132 @@ def check_structure(root: Path):
         issues.append(f'SKILL.md 顶层 ## 章节只有 {heads} 个（疑似结构被破坏）')
     if '每章最小必做清单' not in t:
         issues.append('SKILL.md 缺「每章最小必做清单」（全体系唯一权威清单）')
+
+    # ── 思考协议：位置就是机制（v10.0）────────────────────────────────
+    # **判据不是"文档里有没有这个词"，而是"真跑一次编译器，brief 的最后一个字节是不是那张卡"。**
+    # 理由：L0 这一层的全部机制就是**位置**（模型读完 brief 立刻开始思考 → 最后一行 = 第一个思考动作）。
+    # **字符串在 ≠ 位置对**；而"被尾巴盖住"正是本项目反复复发的那类失效
+    # （机制写好了、注入点也在，只是顺序错了 → 一个闸门都不会响）。
+    # ⚠️ 顺带一条纪律：**判据不许绑死在卡的措辞上**（卡一改就误报）——
+    #    这里取的是卡自己的最后一行，改卡不会让守卫骗人。
+    card = root / 'references' / 'cards' / 'card-thinking.md'
+    if not card.is_file():
+        issues.append('缺 `references/cards/card-thinking.md`（L0 思考协议卡）——'
+                      '编译器只会打一句警告后照常出包，思考层会静默消失')
+    else:
+        # ★ **必须用子进程跑，不能在 audit 进程内 import `make_task_package`。**
+        #   实测代价（2026-11-01，`test_guards.py` 用例 52 抓到的）：
+        #   编译器会执行 `_shared.ensure_utf8_stdio()`；一旦有人把它改成**非幂等**的旧写法
+        #   （那正是用例 52 在注入的东西），在**本进程内** import 会把 audit 自己的 stdout
+        #   buffer 关掉 → 后面的 print 全炸 → **audit 死在中途，"非幂等"那条根本来不及报**。
+        #   **规律：新守卫不许改变老守卫的可观测行为。**（代价只有 6 次 × 约 1 秒。）
+        snippet = (
+            'import sys\n'
+            'from pathlib import Path\n'
+            f'sys.path.insert(0, {str(root / "scripts")!r})\n'
+            'import make_task_package as M\n'
+            "out = M.render(Path('.'), 12, {k: 'x' for k, _t, _b, _r, _w in M.SLOTS}, False)\n"
+            f"lines = [l.strip() for l in Path({str(card)!r}).read_text(encoding='utf-8')"
+            '.strip().splitlines() if l.strip()]\n'
+            # ① 以思考卡结尾  ② 思考卡在「现在开始写」之后
+            "a = '1' if (lines and out.rstrip().endswith(lines[-1])) else '0'\n"
+            "b = '1' if out.find('## 现在开始写') < out.find('# 现在开始想') else '0'\n"
+            # ③ 每个槽位标题都带类型标签（〔已定〕/〔素材〕/〔红线〕）
+            #    为什么必须逐个带：标签是**权重分层**的唯一载体。少一个槽位没登记，
+            #    它就以"素材"混进"已定"里 → 写手不知道该不该照它写。
+            "c = '1' if out.count('\\n## 〔') == len(M.SLOTS) else '0'\n"
+            # ④ 尾部有「一次豁免」，且在「现在开始写」之后（张力出口必须在动作区）
+            "e = '1' if (out.find('一次豁免') > out.find('## 现在开始写') > 0) else '0'\n"
+            # ⑤ 头部说清了"只有最后一段要动手"（少而硬的唯一载体）
+            "f = '1' if '只有最后一段要你动手' in out else '0'\n"
+            'print(a + b + c + e + f)\n'
+        )
+        flag = ''
+        try:
+            r = subprocess.run([sys.executable, '-X', 'utf8', '-c', snippet],
+                               capture_output=True, text=True, timeout=120)
+            flag = (r.stdout or '').strip().splitlines()[-1] if (r.stdout or '').strip() else ''
+        except Exception as e:  # noqa: BLE001
+            issues.append(f'思考协议位置守卫执行失败：{type(e).__name__}: {e} —— 不算通过')
+        if not flag:
+            issues.append('跑不动编译器（`make_task_package.render`）—— '
+                          '本守卫判不了，不算通过')
+        elif flag != '11111':
+            if flag[0] != '1':
+                issues.append('brief **不是**以「思考协议」卡结尾 —— '
+                              '这一层的机制就是位置，位置错了等于没接上')
+            if flag[1] != '1':
+                issues.append('「思考协议」块**排在了「现在开始写」之前** —— '
+                              '起手式会被后面三条盖住（模型读到的是最后那一条）')
+            if flag[2] != '1':
+                issues.append('有槽位标题**没带类型标签**（〔已定〕／〔素材〕／〔红线〕）—— '
+                              '标签是权重分层的唯一载体，缺一个它就和"已定事实"混在一起')
+            if flag[3] != '1':
+                issues.append('尾部缺「一次豁免」或它不在「现在开始写」之后 —— '
+                              '张力出口必须在动作区，否则等于没给')
+            if flag[4] != '1':
+                issues.append('头部没说清「只有最后一段要你动手」—— '
+                              '那写手会把 23 段全当清单（实测：清单越长执行率越低）')
+
+    # ── 后果链校验器：**它必须真的会红**（v11.0）──────────────────────
+    # 失效形态是本项目记录过的第 2 类"看起来在工作"——**永远为空**：
+    #   `_conseq_of()` 的路径解析一旦错（或 `find_meta_file` 改名），每章都读不到后果链
+    #   → 一律走"未启用、不阻塞"那一支 → 打勾通过。**它不报错，只是永远说没事。**
+    # 所以判据不是"文件里有没有这个函数"，而是**喂一份坏账，看它会不会红**。
+    issues += _guard_check_story(root)
     return issues
+
+
+def _guard_check_story(root: Path):
+    """纯函数级实测 `check_story.py` 的后果链判据：好账放行、坏账必须红。
+
+    ★ **为什么在进程内跑、不建临时项目**（2026-11-01 实测出来的代价）：
+      第一版是"建临时目录 + subprocess 跑三次"，本机实测让**单次 audit 从 3.4 秒涨到 26 秒**
+      （新建文件触发安全软件扫描 + 解释器启动 × 3），而 `test_guards.py` 会调 audit 六次 →
+      整套注入测试从 7 分钟涨到 20 分钟以上，**被工具超时掐死并留下注入残留**。
+      → **守卫不许让 QA 变贵**（与 v10 那条"新守卫不许改变老守卫的可观测行为"同族）。
+      `parse_consequence` / `validate_consequence` 是**纯函数**，直接喂文本就够；
+      "路径解析错了"这一层由真实项目上的 `_conseq_of` 暴露，不靠这里造。
+    """
+    sc = root / 'scripts' / 'check_story.py'
+    if not sc.is_file():
+        return ['缺 `scripts/check_story.py` —— 后果链的形状校验没有载体']
+    con_seq_ok = ('## 后果链\n'
+                  '- 动作：他把唯一的证据交给警察\n'
+                  '- 一阶：证据袋进了"待归档"抽屉，他手上再没有能自证的东西\n'
+                  '- 二阶：第 9 章老周听说后当场改口，不肯再替他作保\n'
+                  '- 没看见的路：他可以先复印一份；他没选，因为他以为公家不会赖\n'
+                  '- 误判：他以为警察会信他，错在他没看见警察一直在看表\n')
+    bads = {
+        '二阶没指向': con_seq_ok.replace('第 9 章老周听说后当场改口，不肯再替他作保',
+                                    '老周因此对他起了疑心，关系出现裂痕'),
+        '误判写无': con_seq_ok.replace('他以为警察会信他，错在他没看见警察一直在看表', '无'),
+        '总结词': con_seq_ok.replace('第 9 章老周听说后当场改口，不肯再替他作保',
+                                 '第 9 章埋下伏笔，关系变差'),
+    }
+    try:
+        import importlib
+        sd = str(root / 'scripts')
+        if sd not in sys.path:
+            sys.path.insert(0, sd)
+        CS = importlib.reload(importlib.import_module('check_story'))
+    except Exception as e:  # noqa: BLE001
+        return [f'后果链守卫：import check_story 失败（{type(e).__name__}: {e}）—— 不算通过']
+
+    d = CS.parse_consequence(con_seq_ok)
+    if not d or len(d) != len(CS.CKEYS):
+        return [f'`parse_consequence` 抽不全五栏（抽到 {len(d or {})}/5 栏）—— '
+                f'解析契约坏了，作者写对了也会被判红']
+    errs = [m for lv, m in CS.validate_consequence(d) if lv == 'err']
+    if errs:
+        return [f'后果链校验器把**好账判红了** —— 它会逼作者把对的改成错的：{errs[0][:110]}']
+    for label, bad in bads.items():
+        eb = [m for lv, m in CS.validate_consequence(CS.parse_consequence(bad) or {})
+              if lv == 'err']
+        if not eb:
+            return [f'后果链校验器**没抓到坏账**（{label}）—— '
+                    f'"永远为空"型失效：它不报错，只是永远说没事']
+    return []
 
 
 # ---------------------------------------------------------------- 6. 残留检查
@@ -1679,20 +1832,35 @@ def check_rewrite_reading_sync(root: Path):
     issues = []
     sk = read_text(root / 'SKILL.md')
     de = read_text(root / 'references' / 'guides' / 'deai-entry.md')
-    a7 = [l for l in sk.split('\n') if l.startswith('| 7 |')]
+    # ★ 2026-10-26 v9.0：一章清单从「10 个动作」收成「5 步」，改写不再叫"动作 7"，
+    #   而是第 4 步「改」。这条守卫的**不变量**也随之改变（不是放宽）：
+    #   改写步必须同时指向两件东西 ——
+    #     · `deai-entry`（**工序**：五步顺序 + 三禁令 + 分诊档）
+    #     · `card-revise`（**操作**：先补后压 / 占位式 / 三行对照 / 粒度顺序）
+    #   少任何一个，执行改的人就只剩"凭语感把句子写长"这一条路
+    #   （2026-10-21 实测过的缺口，原样适用于新结构）。
+    a7 = [l for l in sk.split('\n') if l.startswith('| **4 改**')]
     if not a7:
-        issues.append('`SKILL.md` 里找不到以 `| 7 |` 开头的动作 7 行（表格格式可能变了）'
+        issues.append('`SKILL.md` 里找不到「| **4 改** |」这一步（一章清单的表格格式可能变了）'
                       '—— 本守卫判不了，不算通过')
     else:
-        s7 = set(re.findall(r'guides/([a-z0-9\-]+)\.md', a7[0]))
+        row = a7[0]
+        for _need, _why in (('deai-entry', '工序（五步顺序/三禁令/分诊档）'),
+                            ('card-revise', '操作（先补后压/占位式/三行对照）')):
+            if _need not in row:
+                issues.append(f'`SKILL.md` 的改写步（4 改）没有指向 `{_need}` —— '
+                              f'走这一步的执行者不会打开它（它承载的是{_why}）')
+        # 反向：入口侧那张索引表**看起来完整**，所以执行者不会回去对照。
+        # 判据方向仍是单向（入口可以多列，不许缺）。
+        s7 = set(re.findall(r'guides/([a-z0-9\-]+)\.md', row)) | \
+             set(re.findall(r'cards/([a-z0-9\-]+)\.md', row))
         try:
             i3, i4 = de.index('### 第 3 步'), de.index('### 第 4 步')
             s3 = set(re.findall(r'([a-z0-9\-]+)\.md', de[i3:i4]))
-            missing = sorted(g for g in (s7 - s3) if g != 'deai-entry')
+            missing = sorted(g for g in (s7 - s3) if g not in ('deai-entry', 'card-revise'))
             if missing:
-                issues.append(f'`deai-entry.md` 第 3 步少了 {len(missing)} 本动作 7 要求的改写读点：'
-                              f'{" / ".join(missing)} —— 走入口的执行者不会打开它们'
-                              f'（改第 3 步的索引表，或改动作 7，两处必须同步）')
+                issues.append(f'`deai-entry.md` 第 3 步少了 {len(missing)} 本改写步要求的读点：'
+                              f'{" / ".join(missing)} —— 走入口的执行者不会打开它们')
         except ValueError:
             issues.append('`deai-entry.md` 找不到「### 第 3 步」或「### 第 4 步」锚点'
                           '—— 本守卫判不了，不算通过')

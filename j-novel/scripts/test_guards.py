@@ -2034,8 +2034,13 @@ def main():
 
     print('99. ★ **口吻宪法缺失 → 任务包 `voice_charter` 变【待填】、`--check` 拒绝开工**')
     print('   （v7.6.0 的**交付点**：圣经有 `## 〇、口吻宪法` → 脚本抽进包；没有 → TODO。')
-    print('     control 同时钉住另外两件事：槽位总数 **19/19**、且它**排在 `batch_global` 之前**'
+    print('     control 同时钉住另外两件事：槽位总数**与编译器一致（N/N）**、且它**排在 `batch_global` 之前**'
           '（位置是有意的：声音管每一句，其他正向素材只管这一章/这一批）。）')
+    # ⚠️ 槽位数**不许写死**（2026-11-01 修）：此处原本硬编码「19/19」，而 v9.0 加进
+    #    `promise_debt` / `story_ledger` / `craft_cards` 之后 `len(SLOTS)` 已是 **22** ——
+    #    于是这个用例**从 v9.0 起一直是红的**，而"一直红的用例"和"没有用例"是同一件事
+    #    （本套自己的判据：假的绿在骗人，长期的红则是把整张表作废）。
+    #    现在按**编译器实际产出的槽位数**算期望值：既不漂，也仍然钉住"check 必须回显同一个数"。
     _p99a = _mk_voice_proj(_tmp / '_guard_voicecharter_ok')
     _ra99, _oa99 = _run_pkg(str(_p99a), '--chapter', '1', '--write')
     _pkg99 = _p99a / '任务包' / '第01章-任务包.md'
@@ -2060,21 +2065,23 @@ def main():
     print(f'       control（有口吻宪法）exit={_rc99}（**应 0**）｜'
           f'注入（无口吻宪法）exit={_rc99b}（**应 1**）')
     print(f'       control 槽位行：'
-          f'{[l.strip() for l in _oc99.splitlines() if l.strip().startswith("槽位 18/")]}')
+          f'{[l.strip() for l in _oc99.splitlines() if "槽位 " in l and "/" in l]}')
     print(f'       control voice_charter 有样本块={"声音样本" in _body99}｜'
           f'排在 batch_global 之前={_order99}｜'
           f'注入为待填={"【待填" in _body99b}')
+    _n99 = len(re.findall(r'<!-- slot:[a-z_]+ ', _t99))          # 编译器实际产出的槽位数
+    _want99 = f'槽位 {_n99}/{_n99}'                               # 期望 check 回显的同一串
     _ok99 = (_rc99 == 0
-             and '槽位 19/19' in _oc99
+             and _want99 in _oc99
              and '声音样本' in _body99
              and '【待填' not in _body99
              and '旧项目补一段口吻宪法即可' in _body99b
              and _rc99b == 1
              and '槽位 `voice_charter` 还是待填状态' in _oc99b
-             and '槽位 19/19' in _oc99b
+             and _want99 in _oc99b
              and _order99)
     print(f'  {"✓" if _ok99 else "✗"} 口吻宪法交付点  →  '
-          f'{"抓到（有→19/19 放行且在 batch_global 前；无→待填+拒绝开工）" if _ok99 else "**没抓到！**"}')
+          f'{f"抓到（有→{_n99}/{_n99} 放行且在 batch_global 前；无→待填+拒绝开工）" if _ok99 else "**没抓到！**"}')
     if not _ok99:
         print('       control 输出：', _oc99[-300:].replace('\n', ' / ')[:260])
         print('       注入 输出：', _oc99b[-300:].replace('\n', ' / ')[:260])
